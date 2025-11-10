@@ -1,0 +1,242 @@
+{% extends "unfold/layouts/base.html" %}
+{% load i18n static unfold %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% trans 'Home' %}</a>
+    <span class="separator">›</span>
+    <span>{% trans 'Purchase Report' %}</span>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="report-container">
+    <div class="space-y-6">
+        <!-- Page Header -->
+        <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
+            <div>
+                <h1 class="text-3xl font-bold tracking-tight bg-gradient-to-r from-primary-600 to-primary-400 bg-clip-text text-transparent">
+                    {% trans "Purchase Report" %}
+                </h1>
+                <p class="mt-2 text-sm text-muted-foreground">{% trans "View and filter purchase records" %}</p>
+            </div>
+            <div class="flex gap-2">
+                <a href="?{{ request.GET.urlencode }}&export=xlsx"
+                    class="addlink bg-primary-600 flex items-center h-9 justify-center -my-1 rounded-full w-9 hover:bg-primary-700 transition-colors"
+                    title="{% trans 'Export to Excel' %}">
+                    <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                </a>
+            </div>
+        </div>
+
+        <!-- Filter Form -->
+        <div class="rounded-xl border bg-card text-card-foreground shadow-md p-6">
+            <h3 class="text-lg font-semibold mb-4">{% trans "Filters" %}</h3>
+            <form method="get" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div>
+                    <label class="block text-sm font-medium mb-2">{% trans "From Date" %}</label>
+                    <input type="date" name="from_date" value="{{ filters.from_date }}" 
+                        class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-2">{% trans "To Date" %}</label>
+                    <input type="date" name="to_date" value="{{ filters.to_date }}"
+                        class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-2">{% trans "Supplier" %}</label>
+                    <select name="supplier" class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
+                        <option value="">{% trans "All Suppliers" %}</option>
+                        {% for supplier in suppliers %}
+                        <option value="{{ supplier.id }}" {% if filters.supplier == supplier.id|stringformat:"s" %}selected{% endif %}>
+                            {{ supplier.name }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-2">{% trans "Status" %}</label>
+                    <select name="status" class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
+                        <option value="">{% trans "All Status" %}</option>
+                        <option value="draft" {% if filters.status == "draft" %}selected{% endif %}>{% trans "Draft" %}</option>
+                        <option value="sent" {% if filters.status == "sent" %}selected{% endif %}>{% trans "Sent" %}</option>
+                        <option value="confirmed" {% if filters.status == "confirmed" %}selected{% endif %}>{% trans "Confirmed" %}</option>
+                        <option value="received" {% if filters.status == "received" %}selected{% endif %}>{% trans "Received" %}</option>
+                        <option value="completed" {% if filters.status == "completed" %}selected{% endif %}>{% trans "Completed" %}</option>
+                    </select>
+                </div>
+                <div class="md:col-span-2 lg:col-span-4 flex gap-2">
+                    <button type="submit"
+                        class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-primary-600 hover:bg-primary-700">
+                        {% trans "Apply Filters" %}
+                    </button>
+                    <a href="{% url 'erp:purchase-report' %}"
+                        class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700">
+                        {% trans "Clear Filters" %}
+                    </a>
+                </div>
+            </form>
+        </div>
+
+        <!-- Summary Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div class="rounded-xl border bg-card text-card-foreground shadow-md p-5">
+                <p class="text-sm font-medium text-muted-foreground mb-1">{% trans "Total Purchases" %}</p>
+                <p class="text-2xl font-bold">{{ total_purchases }}</p>
+            </div>
+            <div class="rounded-xl border bg-card text-card-foreground shadow-md p-5">
+                <p class="text-sm font-medium text-muted-foreground mb-1">{% trans "Total Amount" %}</p>
+                <p class="text-2xl font-bold text-blue-600 dark:text-blue-400">${{ total_amount }}</p>
+            </div>
+            <div class="rounded-xl border bg-card text-card-foreground shadow-md p-5">
+                <p class="text-sm font-medium text-muted-foreground mb-1">{% trans "Total Paid" %}</p>
+                <p class="text-2xl font-bold text-green-600 dark:text-green-400">${{ total_paid }}</p>
+            </div>
+            <div class="rounded-xl border bg-card text-card-foreground shadow-md p-5">
+                <p class="text-sm font-medium text-muted-foreground mb-1">{% trans "Total Due" %}</p>
+                <p class="text-2xl font-bold text-red-600 dark:text-red-400">${{ total_due }}</p>
+            </div>
+        </div>
+
+        <!-- Status Breakdown -->
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div class="rounded-lg border bg-card p-3 text-center">
+                <p class="text-xs text-muted-foreground mb-1">{% trans "Draft" %}</p>
+                <p class="text-lg font-bold text-gray-600 dark:text-gray-400">{{ draft_count }}</p>
+            </div>
+            <div class="rounded-lg border bg-card p-3 text-center">
+                <p class="text-xs text-muted-foreground mb-1">{% trans "Sent" %}</p>
+                <p class="text-lg font-bold text-blue-600 dark:text-blue-400">{{ sent_count }}</p>
+            </div>
+            <div class="rounded-lg border bg-card p-3 text-center">
+                <p class="text-xs text-muted-foreground mb-1">{% trans "Confirmed" %}</p>
+                <p class="text-lg font-bold text-yellow-600 dark:text-yellow-400">{{ confirmed_count }}</p>
+            </div>
+            <div class="rounded-lg border bg-card p-3 text-center">
+                <p class="text-xs text-muted-foreground mb-1">{% trans "Received" %}</p>
+                <p class="text-lg font-bold text-orange-600 dark:text-orange-400">{{ received_count }}</p>
+            </div>
+            <div class="rounded-lg border bg-card p-3 text-center">
+                <p class="text-xs text-muted-foreground mb-1">{% trans "Completed" %}</p>
+                <p class="text-lg font-bold text-green-600 dark:text-green-400">{{ completed_count }}</p>
+            </div>
+        </div>
+
+        <!-- Purchases Table -->
+        <div class="rounded-xl border bg-card text-card-foreground shadow-md hover:shadow-lg transition-shadow overflow-hidden">
+            <div class="p-6 border-b border-border flex items-center justify-between">
+                <div>
+                    <h3 class="text-lg font-semibold">{% trans "Purchase Records" %}</h3>
+                    {% if showing_limited %}
+                    <p class="text-sm text-muted-foreground mt-1">
+                        {% blocktrans with limit=current_limit total=total_purchases %}Showing {{ limit }} of {{ total }} records{% endblocktrans %}
+                    </p>
+                    {% else %}
+                    <p class="text-sm text-muted-foreground mt-1">
+                        {% blocktrans with total=total_purchases %}Showing all {{ total }} records{% endblocktrans %}
+                    </p>
+                    {% endif %}
+                </div>
+                <div class="flex items-center gap-2">
+                    <label class="text-sm text-muted-foreground">{% trans "Show" %}:</label>
+                    <select id="limitSelect" onchange="changeLimit(this.value)"
+                        class="px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+                        data-current-limit="{{ current_limit }}">
+                        <option value="10">10</option>
+                        <option value="20">20</option>
+                        <option value="100">100</option>
+                        <option value="200">200</option>
+                        <option value="all">{% trans "All" %}</option>
+                    </select>
+                    <script>
+                        (function() {
+                            var select = document.getElementById('limitSelect');
+                            var currentLimit = select.getAttribute('data-current-limit');
+                            if (currentLimit) {
+                                select.value = currentLimit;
+                            }
+                        })();
+                        function changeLimit(limit) {
+                            const url = new URL(window.location.href);
+                            url.searchParams.set('limit', limit);
+                            window.location.href = url.toString();
+                        }
+                    </script>
+                </div>
+            </div>
+            {% if purchases %}
+            <div class="overflow-auto max-h-[600px]">
+                <table class="w-full">
+                    <thead class="bg-muted/50 sticky top-0">
+                        <tr>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">{% trans "Purchase Number" %}</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">{% trans "Date" %}</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">{% trans "Supplier" %}</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">{% trans "Product" %}</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">{% trans "Quantity" %}</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">{% trans "Amount" %}</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">{% trans "Paid" %}</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">{% trans "Due" %}</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">{% trans "Status" %}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for purchase in purchases %}
+                        <tr class="border-t border-border hover:bg-muted/50 transition-colors">
+                            <td class="px-4 py-3 text-sm font-medium">{{ purchase.order_number }}</td>
+                            <td class="px-4 py-3 text-sm">{{ purchase.order_date|date:"d M, Y" }}</td>
+                            <td class="px-4 py-3 text-sm">{{ purchase.supplier.name }}</td>
+                            <td class="px-4 py-3 text-sm">
+                                {% for item in purchase.items.all|slice:":2" %}
+                                    {{ item.product.name }}{% if not forloop.last %}, {% endif %}
+                                {% endfor %}
+                                {% if purchase.items.count > 2 %}...{% endif %}
+                            </td>
+                            <td class="px-4 py-3 text-sm">{{ purchase.items.count }}</td>
+                            <td class="px-4 py-3 text-sm font-semibold">${{ purchase.total_amount }}</td>
+                            <td class="px-4 py-3 text-sm text-green-600">${{ purchase.paid_amount }}</td>
+                            <td class="px-4 py-3 text-sm text-red-600">${{ purchase.due_amount }}</td>
+                            <td class="px-4 py-3 whitespace-nowrap">
+                                {% if purchase.status == 'completed' %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                                    {% trans "Completed" %}
+                                </span>
+                                {% elif purchase.status == 'draft' %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400">
+                                    {% trans "Draft" %}
+                                </span>
+                                {% elif purchase.status == 'sent' %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400">
+                                    {% trans "Sent" %}
+                                </span>
+                                {% elif purchase.status == 'confirmed' %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
+                                    {% trans "Confirmed" %}
+                                </span>
+                                {% elif purchase.status == 'received' %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
+                                    {% trans "Received" %}
+                                </span>
+                                {% else %}
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400">
+                                    {{ purchase.get_status_display }}
+                                </span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="p-8 text-center">
+                <p class="text-muted-foreground text-sm">{% trans "No purchase records found." %}</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

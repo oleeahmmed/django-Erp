@@ -1,0 +1,141 @@
+/* Custom Tabs & Form Styling for Unfold Admin - Using Theme Colors */
+
+/* ==================== TABS STYLING ==================== */
+
+/* Tab container background - light gradient */
+ul.bg-base-100 {
+    background: linear-gradient(135deg, rgb(var(--color-primary-50)) 0%, rgb(var(--color-primary-100)) 100%) !important;
+    border: 1px solid rgba(var(--color-primary-800), 0.1) !important;
+}
+
+/* Tab buttons - default state */
+ul.bg-base-100 li a {
+    color: rgb(var(--color-primary-800)) !important;
+    font-weight: 600 !important;
+    transition: all 0.2s ease !important;
+}
+
+/* Tab buttons - hover state */
+ul.bg-base-100 li a:hover {
+    background: rgba(var(--color-primary-500), 0.15) !important;
+    color: rgb(var(--color-primary-800)) !important;
+}
+
+/* Active tab button - using theme primary colors */
+ul.bg-base-100 li a.bg-white,
+ul.bg-base-100 li a[class*="bg-white"] {
+    background: linear-gradient(90deg, rgb(var(--color-primary-500)) 0%, rgb(var(--color-primary-600)) 100%) !important;
+    color: #ffffff !important;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Active tab button hover */
+ul.bg-base-100 li a.bg-white:hover,
+ul.bg-base-100 li a[class*="bg-white"]:hover {
+    background: linear-gradient(90deg, rgb(var(--color-primary-400)) 0%, rgb(var(--color-primary-500)) 100%) !important;
+    color: #ffffff !important;
+}
+
+/* Dark mode tabs */
+.dark ul.bg-base-100 {
+    background: linear-gradient(135deg, rgb(var(--color-primary-800)) 0%, rgb(var(--color-primary-900)) 100%) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+.dark ul.bg-base-100 li a {
+    color: rgba(255, 255, 255, 0.85) !important;
+}
+
+.dark ul.bg-base-100 li a:hover {
+    background: rgba(var(--color-primary-500), 0.2) !important;
+    color: #ffffff !important;
+}
+
+.dark ul.bg-base-100 li a.bg-white,
+.dark ul.bg-base-100 li a[class*="bg-white"] {
+    background: linear-gradient(90deg, rgb(var(--color-primary-500)) 0%, rgb(var(--color-primary-600)) 100%) !important;
+    color: #ffffff !important;
+}
+
+/* ==================== FORM STYLING ==================== */
+
+/* Hide fieldset section descriptions */
+fieldset .leading-relaxed {
+    display: none !important;
+}
+
+/* Form field containers */
+.field-row {
+    transition: background-color 0.2s ease !important;
+}
+
+.field-row:hover {
+    background-color: rgba(var(--color-primary-500), 0.03) !important;
+}
+
+/* Form labels */
+label.required::after {
+    color: rgb(var(--color-primary-500)) !important;
+}
+
+/* Input fields focus state */
+input:focus,
+textarea:focus,
+select:focus {
+    outline-color: rgb(var(--color-primary-500)) !important;
+    border-color: rgb(var(--color-primary-500)) !important;
+}
+
+/* Checkbox/Toggle switches */
+input[type="checkbox"]:checked {
+    background-color: rgb(var(--color-primary-500)) !important;
+}
+
+.dark input[type="checkbox"]:checked {
+    background-color: rgb(var(--color-primary-600)) !important;
+}
+
+/* Fieldset borders */
+fieldset.module {
+    border-radius: 8px !important;
+}
+
+fieldset .border-base-200 {
+    border-color: rgba(var(--color-primary-800), 0.1) !important;
+}
+
+.dark fieldset .border-base-200 {
+    border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Submit buttons and primary actions */
+button[type="submit"],
+.submit-row input[type="submit"] {
+    background: linear-gradient(90deg, rgb(var(--color-primary-500)) 0%, rgb(var(--color-primary-600)) 100%) !important;
+    color: #ffffff !important;
+    border: none !important;
+    font-weight: 600 !important;
+}
+
+button[type="submit"]:hover,
+.submit-row input[type="submit"]:hover {
+    background: linear-gradient(90deg, rgb(var(--color-primary-400)) 0%, rgb(var(--color-primary-500)) 100%) !important;
+    box-shadow: 0 4px 6px rgba(var(--color-primary-500), 0.3) !important;
+}
+
+/* Required field asterisk */
+.text-red-600 {
+    color: rgb(var(--color-primary-500)) !important;
+}
+
+/* Help text */
+.help,
+.helptext {
+    color: rgb(var(--color-primary-800)) !important;
+    opacity: 0.7;
+}
+
+.dark .help,
+.dark .helptext {
+    color: rgba(255, 255, 255, 0.6) !important;
+}
