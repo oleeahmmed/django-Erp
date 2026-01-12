@@ -142,60 +142,52 @@
     <!-- Table -->
     <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-default overflow-hidden">
         <div class="overflow-x-auto overflow-y-auto" style="max-height: 600px;">
-            <table class="w-full text-sm">
+            <table class="w-full text-sm border-collapse">
                 <thead class="sticky top-0 bg-primary-600 dark:bg-primary-700 text-white">
                     <tr>
-                        <th class="px-4 py-3 text-left font-semibold whitespace-nowrap">Order #</th>
-                        <th class="px-4 py-3 text-left font-semibold whitespace-nowrap">Date</th>
-                        <th class="px-4 py-3 text-left font-semibold whitespace-nowrap">Customer</th>
-                        <th class="px-4 py-3 text-left font-semibold whitespace-nowrap">Salesperson</th>
-                        <th class="px-4 py-3 text-left font-semibold whitespace-nowrap">Product</th>
-                        <th class="px-4 py-3 text-right font-semibold whitespace-nowrap">Quantity</th>
-                        <th class="px-4 py-3 text-right font-semibold whitespace-nowrap">Unit Price</th>
-                        <th class="px-4 py-3 text-right font-semibold whitespace-nowrap">Discount</th>
-                        <th class="px-4 py-3 text-right font-semibold whitespace-nowrap">Tax</th>
-                        <th class="px-4 py-3 text-right font-semibold whitespace-nowrap">Line Total</th>
-                        <th class="px-4 py-3 text-center font-semibold whitespace-nowrap">Status</th>
+                        <th class="px-4 py-3 text-left font-semibold whitespace-nowrap border border-white/20">Order #</th>
+                        <th class="px-4 py-3 text-left font-semibold whitespace-nowrap border border-white/20">Date</th>
+                        <th class="px-4 py-3 text-left font-semibold whitespace-nowrap border border-white/20">Customer</th>
+                        <th class="px-4 py-3 text-left font-semibold whitespace-nowrap border border-white/20">Salesperson</th>
+                        <th class="px-4 py-3 text-left font-semibold whitespace-nowrap border border-white/20">Product</th>
+                        <th class="px-4 py-3 text-right font-semibold whitespace-nowrap border border-white/20">Quantity</th>
+                        <th class="px-4 py-3 text-right font-semibold whitespace-nowrap border border-white/20">Unit Price</th>
+                        <th class="px-4 py-3 text-right font-semibold whitespace-nowrap border border-white/20">Line Total</th>
+                        <th class="px-4 py-3 text-center font-semibold whitespace-nowrap border border-white/20">Status</th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-base-200 dark:divide-base-800">
+                <tbody>
                     {% for item in order_items %}
                     <tr class="hover:bg-base-50 dark:hover:bg-base-800 transition-colors">
-                        <td class="px-4 py-3 font-semibold text-font-important-light dark:text-font-important-dark whitespace-nowrap">
+                        <td class="px-4 py-3 font-semibold text-font-important-light dark:text-font-important-dark whitespace-nowrap border border-base-200 dark:border-base-800">
                             {{ item.sales_order.order_number }}
                         </td>
-                        <td class="px-4 py-3 text-font-default-light dark:text-font-default-dark whitespace-nowrap">
+                        <td class="px-4 py-3 text-font-default-light dark:text-font-default-dark whitespace-nowrap border border-base-200 dark:border-base-800">
                             {{ item.sales_order.order_date|date:"Y-m-d" }}
                         </td>
-                        <td class="px-4 py-3 text-font-default-light dark:text-font-default-dark whitespace-nowrap">
+                        <td class="px-4 py-3 text-font-default-light dark:text-font-default-dark whitespace-nowrap border border-base-200 dark:border-base-800">
                             {{ item.sales_order.customer.name }}
                         </td>
-                        <td class="px-4 py-3 text-font-default-light dark:text-font-default-dark whitespace-nowrap">
+                        <td class="px-4 py-3 text-font-default-light dark:text-font-default-dark whitespace-nowrap border border-base-200 dark:border-base-800">
                             {% if item.sales_order.salesperson %}
                                 {{ item.sales_order.salesperson.name }}
                             {% else %}
                                 <span class="text-font-subtle-light dark:text-font-subtle-dark">N/A</span>
                             {% endif %}
                         </td>
-                        <td class="px-4 py-3 text-font-default-light dark:text-font-default-dark whitespace-nowrap">
+                        <td class="px-4 py-3 text-font-default-light dark:text-font-default-dark whitespace-nowrap border border-base-200 dark:border-base-800">
                             {{ item.product.name }}
                         </td>
-                        <td class="px-4 py-3 text-right text-font-default-light dark:text-font-default-dark whitespace-nowrap">
+                        <td class="px-4 py-3 text-right text-font-default-light dark:text-font-default-dark whitespace-nowrap border border-base-200 dark:border-base-800">
                             {{ item.quantity|floatformat:2 }}
                         </td>
-                        <td class="px-4 py-3 text-right text-font-default-light dark:text-font-default-dark whitespace-nowrap">
+                        <td class="px-4 py-3 text-right text-font-default-light dark:text-font-default-dark whitespace-nowrap border border-base-200 dark:border-base-800">
                             ৳{{ item.unit_price|floatformat:2 }}
                         </td>
-                        <td class="px-4 py-3 text-right text-font-default-light dark:text-font-default-dark whitespace-nowrap">
-                            ৳{{ item.discount_amount|floatformat:2 }}
-                        </td>
-                        <td class="px-4 py-3 text-right text-font-default-light dark:text-font-default-dark whitespace-nowrap">
-                            ৳{{ item.tax_amount|floatformat:2 }}
-                        </td>
-                        <td class="px-4 py-3 text-right font-semibold text-font-important-light dark:text-font-important-dark whitespace-nowrap">
+                        <td class="px-4 py-3 text-right font-semibold text-font-important-light dark:text-font-important-dark whitespace-nowrap border border-base-200 dark:border-base-800">
                             ৳{{ item.line_total|floatformat:2 }}
                         </td>
-                        <td class="px-4 py-3 text-center whitespace-nowrap">
+                        <td class="px-4 py-3 text-center whitespace-nowrap border border-base-200 dark:border-base-800">
                             <span class="inline-block px-2 py-1 text-xs font-semibold rounded-full
                                 {% if item.sales_order.status == 'completed' %}bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200
                                 {% elif item.sales_order.status == 'processing' %}bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200
@@ -208,7 +200,7 @@
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="11" class="px-4 py-8 text-center text-font-subtle-light dark:text-font-subtle-dark">
+                        <td colspan="9" class="px-4 py-8 text-center text-font-subtle-light dark:text-font-subtle-dark">
                             No sales data found. Try adjusting your filters.
                         </td>
                     </tr>

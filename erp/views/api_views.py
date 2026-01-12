@@ -111,3 +111,86 @@ def get_purchase_quotation_details(request, purchase_quotation_id):
             'success': False,
             'error': 'Purchase Quotation not found'
         }, status=404)
+
+
+
+@require_http_methods(["GET"])
+@staff_member_required
+def get_product_by_sku(request):
+    """API endpoint to get product by SKU/Barcode - for POS scanning"""
+    sku = request.GET.get('sku', '').strip()
+    
+    if not sku:
+        return JsonResponse({
+            'success': False,
+            'error': 'SKU is required'
+        }, status=400)
+    
+    try:
+        # Try exact match first (case-insensitive)
+        product = Product.objects.filter(sku__iexact=sku, is_active=True).first()
+        
+        if product:
+            return JsonResponse({
+                'success': True,
+                'product': {
+                    'id': product.id,
+                    'name': product.name,
+                    'sku': product.sku,
+                    'selling_price': str(product.selling_price),
+                    'purchase_price': str(product.purchase_price),
+                    'unit': product.unit,
+                    'current_stock': str(product.current_stock),
+                    'category': product.category.name if product.category else None,
+                }
+            })
+        else:
+            return JsonResponse({
+                'success': False,
+                'error': f'Product not found with SKU: {sku}'
+            }, status=404)
+            
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+from ..models import ProductionOrder
+
+
+@require_http_methods(["GET"])
+@staff_member_required
+def get_production_order_components(request, production_order_id):
+    """API endpoint to get production order components for Production Receipt"""
+    try:
+        production_order = ProductionOrder.objects.prefetch_related('components__product').get(id=production_order_id)
+        
+        components = []
+        for comp in production_order.components.all():
+            components.append({
+                'product_id': comp.product.id,
+                'product_name': comp.product.name,
+                'product_sku': comp.product.sku,
+                'quantity_required': str(comp.quantity_required),
+                'quantity_consumed': str(comp.quantity_consumed),
+                'unit_cost': str(comp.unit_cost),
+                'unit': comp.product.unit,
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'production_order_id': production_order.id,
+            'order_number': production_order.order_number,
+            'product_id': production_order.product.id,
+            'product_name': production_order.product.name,
+            'warehouse_id': production_order.warehouse.id,
+            'warehouse_name': production_order.warehouse.name,
+            'components': components,
+        })
+    except ProductionOrder.DoesNotExist:
+        return JsonResponse({
+            'success': False,
+            'error': 'Production Order not found'
+        }, status=404)

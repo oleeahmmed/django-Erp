@@ -76,17 +76,18 @@ class DashboardView(View):
             is_active=True
         ).aggregate(total=Sum('current_balance'))['total'] or Decimal('0.00')
         
-        # Inventory value
-        total_stock_value = sum(
-            float(p.current_stock * p.purchase_price) 
-            for p in Product.objects.filter(is_active=True)
-        )
+        # Inventory value (calculated from warehouse stocks)
+        from ..models import ProductWarehouseStock
+        total_stock_value = ProductWarehouseStock.objects.aggregate(
+            total=Sum(F('quantity') * F('product__purchase_price'))
+        )['total'] or Decimal('0.00')
         
-        # Low stock products
-        low_stock_count = Product.objects.filter(
-            current_stock__lte=F('min_stock_level'),
-            is_active=True
-        ).count()
+        # Low stock products (using Python since current_stock is a property)
+        low_stock_products_list = [
+            p for p in Product.objects.filter(is_active=True)
+            if p.current_stock <= p.min_stock_level
+        ]
+        low_stock_count = len(low_stock_products_list)
         
         # ==================== CHART DATA ====================
         
@@ -154,23 +155,14 @@ class DashboardView(View):
         customer_names = [c['customer__name'] for c in top_customers]
         customer_revenues = [float(c['total']) for c in top_customers]
         
-        # 6. Inventory Status
+        # 6. Inventory Status (using Python since current_stock is a property)
+        all_products = Product.objects.filter(is_active=True)
+        in_stock = sum(1 for p in all_products if p.current_stock > p.min_stock_level)
+        low_stock = sum(1 for p in all_products if 0 < p.current_stock <= p.min_stock_level)
+        out_of_stock = sum(1 for p in all_products if p.current_stock <= 0)
+        
         inventory_labels = ['In Stock', 'Low Stock', 'Out of Stock']
-        inventory_data = [
-            Product.objects.filter(
-                current_stock__gt=F('min_stock_level'),
-                is_active=True
-            ).count(),
-            Product.objects.filter(
-                current_stock__lte=F('min_stock_level'),
-                current_stock__gt=0,
-                is_active=True
-            ).count(),
-            Product.objects.filter(
-                current_stock=0,
-                is_active=True
-            ).count(),
-        ]
+        inventory_data = [in_stock, low_stock, out_of_stock]
         
         # ==================== RECENT ACTIVITIES ====================
         
@@ -189,11 +181,11 @@ class DashboardView(View):
             'customer'
         ).order_by('-created_at')[:5]
         
-        # Low Stock Products
-        low_stock_products = Product.objects.filter(
-            current_stock__lte=F('min_stock_level'),
-            is_active=True
-        ).order_by('current_stock')[:10]
+        # Low Stock Products (already calculated above)
+        low_stock_products = sorted(
+            low_stock_products_list,
+            key=lambda p: p.current_stock
+        )[:10]
         
         context = {
             **admin.site.each_context(request),

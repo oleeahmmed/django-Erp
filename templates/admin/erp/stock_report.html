@@ -142,16 +142,17 @@
                             <td class="px-4 py-3 text-sm font-medium">{{ product.sku }}</td>
                             <td class="px-4 py-3 text-sm">{{ product.name }}</td>
                             <td class="px-4 py-3 text-sm">{{ product.category.name|default:"-" }}</td>
-                            <td class="px-4 py-3 text-sm font-semibold">{{ product.current_stock }}</td>
+                            <td class="px-4 py-3 text-sm font-semibold">{{ product.total_stock|default:"0" }}</td>
                             <td class="px-4 py-3 text-sm">{{ product.min_stock_level }}</td>
                             <td class="px-4 py-3 text-sm">${{ product.purchase_price }}</td>
                             <td class="px-4 py-3 text-sm">${{ product.selling_price }}</td>
                             <td class="px-4 py-3 whitespace-nowrap">
-                                {% if product.current_stock == 0 %}
+                                {% with stock=product.total_stock|default:0 %}
+                                {% if stock == 0 %}
                                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
                                     {% trans "Out of Stock" %}
                                 </span>
-                                {% elif product.current_stock <= product.min_stock_level %}
+                                {% elif stock <= product.min_stock_level %}
                                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
                                     {% trans "Low Stock" %}
                                 </span>
@@ -160,6 +161,7 @@
                                     {% trans "In Stock" %}
                                 </span>
                                 {% endif %}
+                                {% endwith %}
                             </td>
                         </tr>
                         {% endfor %}

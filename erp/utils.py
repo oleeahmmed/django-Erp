@@ -25,9 +25,15 @@ def copy_sales_quotation_to_order(sales_quotation_id):
     """
     Create a sales order from a sales quotation
     Copies all items from the quotation
+    Only ONE sales order can be created from a quotation
     """
     try:
         sales_quotation = SalesQuotation.objects.prefetch_related('items__product').get(id=sales_quotation_id)
+        
+        # Check if order already exists for this quotation
+        existing_order = SalesOrder.objects.filter(sales_quotation=sales_quotation).first()
+        if existing_order:
+            return None, f"Sales Order '{existing_order.order_number}' already exists for this quotation"
         
         # Check if quotation has items
         items = sales_quotation.items.all()
@@ -65,6 +71,10 @@ def copy_sales_quotation_to_order(sales_quotation_id):
                 raise
         
         logger.info(f"Copied {items_created} items from quotation {sales_quotation.quotation_number} to order {sales_order.order_number}")
+        
+        # Update quotation status to converted
+        sales_quotation.status = 'converted'
+        sales_quotation.save(update_fields=['status'])
         
         # Calculate totals
         sales_order.calculate_totals()
@@ -193,7 +203,7 @@ def copy_sales_order_to_invoice(sales_order_id):
 def copy_sales_order_to_return(sales_order_id):
     """
     Create a sales return from a sales order
-    Copies all items that have been delivered
+    Copies all items that have been delivered (and not yet returned)
     """
     try:
         sales_order = SalesOrder.objects.prefetch_related('items__product').get(id=sales_order_id)
@@ -203,6 +213,16 @@ def copy_sales_order_to_return(sales_order_id):
         if not items.exists():
             return None, "Sales Order has no items to copy"
         
+        # Check if any items have been delivered
+        has_delivered_items = False
+        for so_item in items:
+            if so_item.delivered_quantity > 0:
+                has_delivered_items = True
+                break
+        
+        if not has_delivered_items:
+            return None, "No items have been delivered yet. Please create a Delivery first and mark it as 'Delivered' before creating a return."
+        
         # Create sales return
         sales_return = SalesReturn.objects.create(
             sales_order=sales_order,
@@ -211,7 +231,7 @@ def copy_sales_order_to_return(sales_order_id):
             status='pending',
         )
         
-        # Copy items that have been delivered
+        # Copy items that have been delivered (and not yet fully returned)
         items_created = 0
         for so_item in items:
             delivered = so_item.delivered_quantity
@@ -232,7 +252,9 @@ def copy_sales_order_to_return(sales_order_id):
                     raise
         
         if items_created == 0:
-            return None, "No delivered items available to return"
+            # Delete the empty return
+            sales_return.delete()
+            return None, "All delivered items have already been returned."
         
         logger.info(f"Copied {items_created} items from order {sales_order.order_number} to return {sales_return.return_number}")
         
@@ -255,9 +277,15 @@ def copy_purchase_quotation_to_order(purchase_quotation_id):
     """
     Create a purchase order from a purchase quotation
     Copies all items from the quotation
+    Only ONE purchase order can be created from a quotation
     """
     try:
         purchase_quotation = PurchaseQuotation.objects.prefetch_related('items__product').get(id=purchase_quotation_id)
+        
+        # Check if order already exists for this quotation
+        existing_order = PurchaseOrder.objects.filter(purchase_quotation=purchase_quotation).first()
+        if existing_order:
+            return None, f"Purchase Order '{existing_order.order_number}' already exists for this quotation"
         
         # Check if quotation has items
         items = purchase_quotation.items.all()
@@ -289,6 +317,10 @@ def copy_purchase_quotation_to_order(purchase_quotation_id):
                 raise
         
         logger.info(f"Copied {items_created} items from quotation {purchase_quotation.quotation_number} to order {purchase_order.order_number}")
+        
+        # Update quotation status to converted
+        purchase_quotation.status = 'converted'
+        purchase_quotation.save(update_fields=['status'])
         
         # Calculate totals
         purchase_order.calculate_totals()

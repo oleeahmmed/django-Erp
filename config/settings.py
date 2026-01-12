@@ -53,13 +53,22 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     
+    # Third party apps
+    'rest_framework',
+    'rest_framework_simplejwt',
+    'corsheaders',
+    'drf_spectacular',
+    'django_filters',
+    
     # Local apps
     'erp',
+    'hrm',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -149,6 +158,70 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# ==================== REST FRAMEWORK CONFIGURATION ====================
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.DjangoModelPermissions',
+    ],
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20,
+    'DEFAULT_FILTER_BACKENDS': [
+        'django_filters.rest_framework.DjangoFilterBackend',
+        'rest_framework.filters.SearchFilter',
+        'rest_framework.filters.OrderingFilter',
+    ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+# ==================== DRF SPECTACULAR (SWAGGER/REDOC) ====================
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'ERP System API',
+    'DESCRIPTION': 'Complete ERP System API with Sales, Purchase, Inventory, Manufacturing, HRM, and Accounting modules.',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
+    'SWAGGER_UI_SETTINGS': {
+        'deepLinking': True,
+        'persistAuthorization': True,
+        'displayOperationId': True,
+    },
+    'TAGS': [
+        {'name': 'Foundation', 'description': 'Company, Warehouses, Categories, Products, Customers, Suppliers'},
+        {'name': 'Financial', 'description': 'Currencies, Tax, Payment Terms, Bank Accounts, Chart of Accounts'},
+        {'name': 'Sales', 'description': 'Quotations, Orders, Deliveries, Invoices, Returns, Payments'},
+        {'name': 'Purchase', 'description': 'Quotations, Orders, Goods Receipts, Invoices, Returns, Payments'},
+        {'name': 'Manufacturing', 'description': 'Bill of Materials, Production Orders, Production Receipts'},
+        {'name': 'Inventory', 'description': 'Stock Adjustments, Transfers, Warehouse Stock'},
+        {'name': 'Accounting', 'description': 'Journal Entries, Budgets'},
+        {'name': 'System', 'description': 'Discounts, Approvals, Notifications'},
+    ],
+}
+
+# ==================== SIMPLE JWT CONFIGURATION ====================
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+}
+
+# ==================== CORS CONFIGURATION ====================
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+CORS_ALLOW_CREDENTIALS = True
+
 # Unfold Admin Configuration
 UNFOLD = {
     "SITE_TITLE": "ERP Admin Panel",
@@ -181,6 +254,7 @@ UNFOLD = {
         "show_search": True,
         "show_all_applications": False,
         "navigation": [
+            # ==================== DASHBOARD ====================
             {
                 "title": _("Dashboard"),
                 "separator": True,
@@ -192,11 +266,48 @@ UNFOLD = {
                     },
                 ],
             },
+            # ==================== PHASE 1: FOUNDATION & SETUP ====================
             {
-                "title": _("Sales Management"),
+                "title": _("Foundation & Setup"),
                 "separator": True,
                 "collapsible": True,
                 "items": [
+                    {
+                        "title": _("Company"),
+                        "icon": "business",
+                        "link": admin_changelist("erp", "company"),
+                        "permission": lambda request: request.user.has_perm("erp.view_company"),
+                    },
+                    {
+                        "title": _("Warehouses"),
+                        "icon": "warehouse",
+                        "link": admin_changelist("erp", "warehouse"),
+                        "permission": lambda request: request.user.has_perm("erp.view_warehouse"),
+                    },
+                    {
+                        "title": _("Categories"),
+                        "icon": "category",
+                        "link": admin_changelist("erp", "category"),
+                        "permission": lambda request: request.user.has_perm("erp.view_category"),
+                    },
+                    {
+                        "title": _("Products"),
+                        "icon": "inventory_2",
+                        "link": admin_changelist("erp", "product"),
+                        "permission": lambda request: request.user.has_perm("erp.view_product"),
+                    },
+                    {
+                        "title": _("Units of Measure"),
+                        "icon": "straighten",
+                        "link": admin_changelist("erp", "unitofmeasure"),
+                        "permission": lambda request: request.user.has_perm("erp.view_unitofmeasure"),
+                    },
+                    {
+                        "title": _("UOM Conversions"),
+                        "icon": "sync_alt",
+                        "link": admin_changelist("erp", "uomconversion"),
+                        "permission": lambda request: request.user.has_perm("erp.view_uomconversion"),
+                    },
                     {
                         "title": _("Customers"),
                         "icon": "people",
@@ -204,11 +315,111 @@ UNFOLD = {
                         "permission": lambda request: request.user.has_perm("erp.view_customer"),
                     },
                     {
+                        "title": _("Suppliers"),
+                        "icon": "local_shipping",
+                        "link": admin_changelist("erp", "supplier"),
+                        "permission": lambda request: request.user.has_perm("erp.view_supplier"),
+                    },
+                    {
                         "title": _("Sales Persons"),
                         "icon": "badge",
                         "link": admin_changelist("erp", "salesperson"),
                         "permission": lambda request: request.user.has_perm("erp.view_salesperson"),
                     },
+                    {
+                        "title": _("Payment Methods"),
+                        "icon": "payments",
+                        "link": admin_changelist("erp", "paymentmethod"),
+                        "permission": lambda request: request.user.has_perm("erp.view_paymentmethod"),
+                    },
+                ],
+            },
+            # ==================== PHASE 2: FINANCIAL FOUNDATION ====================
+            {
+                "title": _("Financial Foundation"),
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": _("Currencies"),
+                        "icon": "currency_exchange",
+                        "link": admin_changelist("erp", "currency"),
+                        "permission": lambda request: request.user.has_perm("erp.view_currency"),
+                    },
+                    {
+                        "title": _("Exchange Rates"),
+                        "icon": "trending_up",
+                        "link": admin_changelist("erp", "exchangerate"),
+                        "permission": lambda request: request.user.has_perm("erp.view_exchangerate"),
+                    },
+                    {
+                        "title": _("Tax Types"),
+                        "icon": "receipt_long",
+                        "link": admin_changelist("erp", "taxtype"),
+                        "permission": lambda request: request.user.has_perm("erp.view_taxtype"),
+                    },
+                    {
+                        "title": _("Tax Rates"),
+                        "icon": "percent",
+                        "link": admin_changelist("erp", "taxrate"),
+                        "permission": lambda request: request.user.has_perm("erp.view_taxrate"),
+                    },
+                    {
+                        "title": _("Payment Terms"),
+                        "icon": "schedule",
+                        "link": admin_changelist("erp", "paymentterm"),
+                        "permission": lambda request: request.user.has_perm("erp.view_paymentterm"),
+                    },
+                    {
+                        "title": _("Price Lists"),
+                        "icon": "sell",
+                        "link": admin_changelist("erp", "pricelist"),
+                        "permission": lambda request: request.user.has_perm("erp.view_pricelist"),
+                    },
+                    {
+                        "title": _("Bank Accounts"),
+                        "icon": "account_balance",
+                        "link": admin_changelist("erp", "bankaccount"),
+                        "permission": lambda request: request.user.has_perm("erp.view_bankaccount"),
+                    },
+                    {
+                        "title": _("Account Types"),
+                        "icon": "category",
+                        "link": admin_changelist("erp", "accounttype"),
+                        "permission": lambda request: request.user.has_perm("erp.view_accounttype"),
+                    },
+                    {
+                        "title": _("Chart of Accounts"),
+                        "icon": "account_tree",
+                        "link": admin_changelist("erp", "chartofaccounts"),
+                        "permission": lambda request: request.user.has_perm("erp.view_chartofaccounts"),
+                    },
+                    {
+                        "title": _("Cost Centers"),
+                        "icon": "business_center",
+                        "link": admin_changelist("erp", "costcenter"),
+                        "permission": lambda request: request.user.has_perm("erp.view_costcenter"),
+                    },
+                    {
+                        "title": _("Projects"),
+                        "icon": "work",
+                        "link": admin_changelist("erp", "project"),
+                        "permission": lambda request: request.user.has_perm("erp.view_project"),
+                    },
+                    {
+                        "title": _("Fiscal Years"),
+                        "icon": "calendar_today",
+                        "link": admin_changelist("erp", "fiscalyear"),
+                        "permission": lambda request: request.user.has_perm("erp.view_fiscalyear"),
+                    },
+                ],
+            },
+            # ==================== PHASE 3: SALES PROCESS ====================
+            {
+                "title": _("Sales "),
+                "separator": True,
+                "collapsible": True,
+                "items": [
                     {
                         "title": _("Sales Quotations"),
                         "icon": "request_quote",
@@ -239,19 +450,40 @@ UNFOLD = {
                         "link": admin_changelist("erp", "salesreturn"),
                         "permission": lambda request: request.user.has_perm("erp.view_salesreturn"),
                     },
+                    {
+                        "title": _("Incoming Payments"),
+                        "icon": "arrow_downward",
+                        "link": admin_changelist("erp", "incomingpayment"),
+                        "permission": lambda request: request.user.has_perm("erp.view_incomingpayment"),
+                    },
                 ],
             },
+            # ==================== POS (POINT OF SALE) ====================
             {
-                "title": _("Purchase Management"),
+                "title": _("POS (Point of Sale)"),
                 "separator": True,
                 "collapsible": True,
                 "items": [
                     {
-                        "title": _("Suppliers"),
-                        "icon": "local_shipping",
-                        "link": admin_changelist("erp", "supplier"),
-                        "permission": lambda request: request.user.has_perm("erp.view_supplier"),
+                        "title": _("⚡ Quick Sale"),
+                        "icon": "bolt",
+                        "link": admin_changelist("erp", "quicksale"),
+                        "permission": lambda request: request.user.has_perm("erp.view_quicksale"),
                     },
+                    {
+                        "title": _("User POS Profiles"),
+                        "icon": "person_pin",
+                        "link": admin_changelist("erp", "userposprofile"),
+                        "permission": lambda request: request.user.has_perm("erp.view_userposprofile"),
+                    },
+                ],
+            },
+            # ==================== PHASE 4: PURCHASE PROCESS ====================
+            {
+                "title": _("Purchase "),
+                "separator": True,
+                "collapsible": True,
+                "items": [
                     {
                         "title": _("Purchase Quotations"),
                         "icon": "request_quote",
@@ -265,6 +497,18 @@ UNFOLD = {
                         "permission": lambda request: request.user.has_perm("erp.view_purchaseorder"),
                     },
                     {
+                        "title": _("Goods Receipt (PO)"),
+                        "icon": "inventory",
+                        "link": admin_changelist("erp", "goodsreceiptpo"),
+                        "permission": lambda request: request.user.has_perm("erp.view_goodsreceiptpo"),
+                    },
+                    {
+                        "title": _("Goods Receipt (General)"),
+                        "icon": "move_to_inbox",
+                        "link": admin_changelist("erp", "goodsreceipt"),
+                        "permission": lambda request: request.user.has_perm("erp.view_goodsreceipt"),
+                    },
+                    {
                         "title": _("Purchase Invoices"),
                         "icon": "receipt_long",
                         "link": admin_changelist("erp", "purchaseinvoice"),
@@ -276,10 +520,17 @@ UNFOLD = {
                         "link": admin_changelist("erp", "purchasereturn"),
                         "permission": lambda request: request.user.has_perm("erp.view_purchasereturn"),
                     },
+                    {
+                        "title": _("Outgoing Payments"),
+                        "icon": "arrow_upward",
+                        "link": admin_changelist("erp", "outgoingpayment"),
+                        "permission": lambda request: request.user.has_perm("erp.view_outgoingpayment"),
+                    },
                 ],
             },
+            # ==================== PHASE 5: MANUFACTURING ====================
             {
-                "title": _("Production Management"),
+                "title": _("Manufacturing"),
                 "separator": True,
                 "collapsible": True,
                 "items": [
@@ -303,34 +554,22 @@ UNFOLD = {
                     },
                 ],
             },
+            # ==================== PHASE 6: INVENTORY CONTROL ====================
             {
-                "title": _("Inventory Management"),
+                "title": _("Inventory"),
                 "separator": True,
                 "collapsible": True,
                 "items": [
                     {
-                        "title": _("Warehouses"),
-                        "icon": "warehouse",
-                        "link": admin_changelist("erp", "warehouse"),
-                        "permission": lambda request: request.user.has_perm("erp.view_warehouse"),
+                        "title": _("📋 Stock Movement Guide"),
+                        "icon": "help",
+                        "link": lambda request: reverse_lazy("erp:stock-movement-guide"),
                     },
                     {
-                        "title": _("Categories"),
-                        "icon": "category",
-                        "link": admin_changelist("erp", "category"),
-                        "permission": lambda request: request.user.has_perm("erp.view_category"),
-                    },
-                    {
-                        "title": _("Products"),
-                        "icon": "inventory_2",
-                        "link": admin_changelist("erp", "product"),
-                        "permission": lambda request: request.user.has_perm("erp.view_product"),
-                    },
-                    {
-                        "title": _("Goods Receipts"),
-                        "icon": "move_to_inbox",
-                        "link": admin_changelist("erp", "goodsreceipt"),
-                        "permission": lambda request: request.user.has_perm("erp.view_goodsreceipt"),
+                        "title": _("Stock Adjustments"),
+                        "icon": "tune",
+                        "link": admin_changelist("erp", "stockadjustment"),
+                        "permission": lambda request: request.user.has_perm("erp.view_stockadjustment"),
                     },
                     {
                         "title": _("Goods Issues"),
@@ -358,71 +597,17 @@ UNFOLD = {
                     },
                 ],
             },
+            # ==================== PHASE 7: ACCOUNTING ====================
             {
-                "title": _("Banking & Payments"),
+                "title": _("Accounting"),
                 "separator": True,
                 "collapsible": True,
                 "items": [
-                    {
-                        "title": _("Bank Accounts"),
-                        "icon": "account_balance",
-                        "link": admin_changelist("erp", "bankaccount"),
-                        "permission": lambda request: request.user.has_perm("erp.view_bankaccount"),
-                    },
-                    {
-                        "title": _("Incoming Payments"),
-                        "icon": "arrow_downward",
-                        "link": admin_changelist("erp", "incomingpayment"),
-                        "permission": lambda request: request.user.has_perm("erp.view_incomingpayment"),
-                    },
-                    {
-                        "title": _("Outgoing Payments"),
-                        "icon": "arrow_upward",
-                        "link": admin_changelist("erp", "outgoingpayment"),
-                        "permission": lambda request: request.user.has_perm("erp.view_outgoingpayment"),
-                    },
-                ],
-            },
-            {
-                "title": _("Accounting & Finance"),
-                "separator": True,
-                "collapsible": True,
-                "items": [
-                    {
-                        "title": _("Chart of Accounts"),
-                        "icon": "account_tree",
-                        "link": admin_changelist("erp", "chartofaccounts"),
-                        "permission": lambda request: request.user.has_perm("erp.view_chartofaccounts"),
-                    },
-                    {
-                        "title": _("Account Types"),
-                        "icon": "category",
-                        "link": admin_changelist("erp", "accounttype"),
-                        "permission": lambda request: request.user.has_perm("erp.view_accounttype"),
-                    },
                     {
                         "title": _("Journal Entries"),
                         "icon": "book",
                         "link": admin_changelist("erp", "journalentry"),
                         "permission": lambda request: request.user.has_perm("erp.view_journalentry"),
-                    },
-                    {
-                        "title": _("Projects"),
-                        "icon": "work",
-                        "link": admin_changelist("erp", "project"),
-                        "permission": lambda request: request.user.has_perm("erp.view_project"),
-                    },
-                    {
-                        "title": _("Cost Centers"),
-                        "icon": "business_center",
-                        "link": admin_changelist("erp", "costcenter"),
-                        "permission": lambda request: request.user.has_perm("erp.view_costcenter"),
-                    },
-                    {
-                        "title": _("Fiscal Years"),
-                        "icon": "calendar_today",
-                        "link": admin_changelist("erp", "fiscalyear"),
-                        "permission": lambda request: request.user.has_perm("erp.view_fiscalyear"),
                     },
                     {
                         "title": _("Budgets"),
@@ -432,6 +617,7 @@ UNFOLD = {
                     },
                 ],
             },
+            # ==================== REPORTS ====================
             {
                 "title": _("Reports"),
                 "separator": True,
@@ -441,6 +627,31 @@ UNFOLD = {
                         "title": _("Sales Report"),
                         "icon": "assessment",
                         "link": lambda request: reverse_lazy("erp:sales-report"),
+                    },
+                    {
+                        "title": _("Sales Quotation Report"),
+                        "icon": "request_quote",
+                        "link": lambda request: reverse_lazy("erp:sales-quotation-report"),
+                    },
+                    {
+                        "title": _("Delivery Report"),
+                        "icon": "local_shipping",
+                        "link": lambda request: reverse_lazy("erp:delivery-report"),
+                    },
+                    {
+                        "title": _("Invoice Report"),
+                        "icon": "receipt",
+                        "link": lambda request: reverse_lazy("erp:invoice-report"),
+                    },
+                    {
+                        "title": _("Sales Return Report"),
+                        "icon": "assignment_return",
+                        "link": lambda request: reverse_lazy("erp:sales-return-report"),
+                    },
+                    {
+                        "title": _("Incoming Payment Report"),
+                        "icon": "payments",
+                        "link": lambda request: reverse_lazy("erp:incoming-payment-report"),
                     },
                     {
                         "title": _("Purchase Report"),
@@ -454,19 +665,85 @@ UNFOLD = {
                     },
                 ],
             },
-            {
-                "title": _("Settings"),
-                "separator": True,
-                "collapsible": True,
-                "items": [
-                    {
-                        "title": _("Company"),
-                        "icon": "business",
-                        "link": admin_changelist("erp", "company"),
-                        "permission": lambda request: request.user.has_perm("erp.view_company"),
-                    },
-                ],
-            },
+            # # ==================== DISCOUNT MANAGEMENT ====================
+            # {
+            #     "title": _("Discount Management"),
+            #     "separator": True,
+            #     "collapsible": True,
+            #     "items": [
+            #         {
+            #             "title": _("Discount Types"),
+            #             "icon": "local_offer",
+            #             "link": admin_changelist("erp", "discounttype"),
+            #             "permission": lambda request: request.user.has_perm("erp.view_discounttype"),
+            #         },
+            #         {
+            #             "title": _("Discount Rules"),
+            #             "icon": "rule",
+            #             "link": admin_changelist("erp", "discountrule"),
+            #             "permission": lambda request: request.user.has_perm("erp.view_discountrule"),
+            #         },
+            #     ],
+            # },
+            # # ==================== APPROVAL WORKFLOW ====================
+            # {
+            #     "title": _("Approval Workflow"),
+            #     "separator": True,
+            #     "collapsible": True,
+            #     "items": [
+            #         {
+            #             "title": _("Workflows"),
+            #             "icon": "account_tree",
+            #             "link": admin_changelist("erp", "approvalworkflow"),
+            #             "permission": lambda request: request.user.has_perm("erp.view_approvalworkflow"),
+            #         },
+            #         {
+            #             "title": _("Approval Levels"),
+            #             "icon": "layers",
+            #             "link": admin_changelist("erp", "approvallevel"),
+            #             "permission": lambda request: request.user.has_perm("erp.view_approvallevel"),
+            #         },
+            #         {
+            #             "title": _("Approval Requests"),
+            #             "icon": "pending_actions",
+            #             "link": admin_changelist("erp", "approvalrequest"),
+            #             "permission": lambda request: request.user.has_perm("erp.view_approvalrequest"),
+            #         },
+            #     ],
+            # },
+            # # ==================== NOTIFICATIONS ====================
+            # {
+            #     "title": _("Notifications & Alerts"),
+            #     "separator": True,
+            #     "collapsible": True,
+            #     "items": [
+            #         {
+            #             "title": _("Notification Types"),
+            #             "icon": "notifications_active",
+            #             "link": admin_changelist("erp", "notificationtype"),
+            #             "permission": lambda request: request.user.has_perm("erp.view_notificationtype"),
+            #         },
+            #         {
+            #             "title": _("Notifications"),
+            #             "icon": "notifications",
+            #             "link": admin_changelist("erp", "notification"),
+            #             "permission": lambda request: request.user.has_perm("erp.view_notification"),
+            #         },
+            #         {
+            #             "title": _("Alert Rules"),
+            #             "icon": "warning",
+            #             "link": admin_changelist("erp", "alertrule"),
+            #             "permission": lambda request: request.user.has_perm("erp.view_alertrule"),
+            #         },
+            #         {
+            #             "title": _("User Settings"),
+            #             "icon": "settings",
+            #             "link": admin_changelist("erp", "notificationsetting"),
+            #             "permission": lambda request: request.user.has_perm("erp.view_notificationsetting"),
+            #         },
+            #     ],
+            # },
+            # ==================== AUTHENTICATION ====================
             {
                 "title": _("Authentication & Authorization"),
                 "separator": True,
@@ -481,6 +758,145 @@ UNFOLD = {
                         "title": _("Groups"),
                         "icon": "group",
                         "link": lambda request: reverse_lazy("admin:auth_group_changelist"),
+                    },
+                ],
+            },
+            # ==================== HRM - HUMAN RESOURCE MANAGEMENT ====================
+            {
+                "title": _("HRM"),
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    # Organization
+                    {
+                        "title": _("Departments"),
+                        "icon": "corporate_fare",
+                        "link": admin_changelist("hrm", "department"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_department"),
+                    },
+                    {
+                        "title": _("Designations"),
+                        "icon": "work",
+                        "link": admin_changelist("hrm", "designation"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_designation"),
+                    },
+                    {
+                        "title": _("Shifts"),
+                        "icon": "schedule",
+                        "link": admin_changelist("hrm", "shift"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_shift"),
+                    },
+                    {
+                        "title": _("Locations"),
+                        "icon": "location_on",
+                        "link": admin_changelist("hrm", "location"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_location"),
+                    },
+                    # Employees
+                    {
+                        "title": _("Employees"),
+                        "icon": "badge",
+                        "link": admin_changelist("hrm", "employee"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_employee"),
+                    },
+                    {
+                        "title": _("Personal Info"),
+                        "icon": "person",
+                        "link": admin_changelist("hrm", "employeepersonalinfo"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_employeepersonalinfo"),
+                    },
+                    {
+                        "title": _("Education"),
+                        "icon": "school",
+                        "link": admin_changelist("hrm", "employeeeducation"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_employeeeducation"),
+                    },
+                    {
+                        "title": _("Salaries"),
+                        "icon": "payments",
+                        "link": admin_changelist("hrm", "employeesalary"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_employeesalary"),
+                    },
+                    {
+                        "title": _("Skills"),
+                        "icon": "psychology",
+                        "link": admin_changelist("hrm", "employeeskill"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_employeeskill"),
+                    },
+                    # Attendance
+                    {
+                        "title": _("Attendance"),
+                        "icon": "fact_check",
+                        "link": admin_changelist("hrm", "attendance"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_attendance"),
+                    },
+                    {
+                        "title": _("Attendance Logs"),
+                        "icon": "fingerprint",
+                        "link": admin_changelist("hrm", "attendancelog"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_attendancelog"),
+                    },
+                    {
+                        "title": _("Overtime"),
+                        "icon": "more_time",
+                        "link": admin_changelist("hrm", "overtime"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_overtime"),
+                    },
+                    {
+                        "title": _("Rosters"),
+                        "icon": "calendar_month",
+                        "link": admin_changelist("hrm", "roster"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_roster"),
+                    },
+                    # Leave
+                    {
+                        "title": _("Leave Types"),
+                        "icon": "event_busy",
+                        "link": admin_changelist("hrm", "leavetype"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_leavetype"),
+                    },
+                    {
+                        "title": _("Leave Applications"),
+                        "icon": "pending_actions",
+                        "link": admin_changelist("hrm", "leaveapplication"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_leaveapplication"),
+                    },
+                    {
+                        "title": _("Leave Balances"),
+                        "icon": "account_balance_wallet",
+                        "link": admin_changelist("hrm", "leavebalance"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_leavebalance"),
+                    },
+                    {
+                        "title": _("Holidays"),
+                        "icon": "celebration",
+                        "link": admin_changelist("hrm", "holiday"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_holiday"),
+                    },
+                    # Devices
+                    {
+                        "title": _("ZK Devices"),
+                        "icon": "devices",
+                        "link": admin_changelist("hrm", "zkdevice"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_zkdevice"),
+                    },
+                    {
+                        "title": _("Device Users"),
+                        "icon": "group",
+                        "link": admin_changelist("hrm", "deviceuser"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_deviceuser"),
+                    },
+                    {
+                        "title": _("Device Commands"),
+                        "icon": "terminal",
+                        "link": admin_changelist("hrm", "devicecommand"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_devicecommand"),
+                    },
+                    {
+                        "title": _("Notices"),
+                        "icon": "campaign",
+                        "link": admin_changelist("hrm", "notice"),
+                        "permission": lambda request: request.user.has_perm("hrm.view_notice"),
                     },
                 ],
             },

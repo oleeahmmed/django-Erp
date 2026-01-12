@@ -87,12 +87,14 @@ class Product(TimeStampedModel):
     # Warehouse
     default_warehouse = models.ForeignKey('Warehouse', on_delete=models.SET_NULL, null=True, blank=True, related_name='default_products', verbose_name=_("Default Warehouse"))
     
+    # Default BOM for Quick Sale - when sold, BOM components will be deducted from stock
+    default_bom = models.ForeignKey('BillOfMaterials', on_delete=models.SET_NULL, null=True, blank=True, related_name='default_for_products', verbose_name=_("Default BOM"), help_text=_("If set, Quick Sale will deduct BOM components instead of this product"))
+    
     # Pricing
     purchase_price = models.DecimalField(_("Purchase Price"), max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
     selling_price = models.DecimalField(_("Selling Price"), max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
     
-    # Stock (Total across all warehouses)
-    current_stock = models.DecimalField(_("Current Stock"), max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    # Stock settings (actual stock is in ProductWarehouseStock)
     min_stock_level = models.DecimalField(_("Minimum Stock Level"), max_digits=10, decimal_places=2, default=Decimal('10.00'))
     
     is_active = models.BooleanField(_("Active"), default=True)
@@ -105,10 +107,45 @@ class Product(TimeStampedModel):
     def __str__(self):
         return f"{self.name} ({self.sku})"
     
+    @property
+    def current_stock(self):
+        """Total stock across all warehouses (calculated from ProductWarehouseStock)"""
+        from django.db.models import Sum
+        total = self.warehouse_stocks.aggregate(total=Sum('quantity'))['total']
+        return total or Decimal('0.00')
+    
+    @property
+    def default_warehouse_stock(self):
+        """Stock in default warehouse only"""
+        if self.default_warehouse:
+            return self.get_warehouse_stock(self.default_warehouse)
+        return Decimal('0.00')
+    
     def get_warehouse_stock(self, warehouse):
         """Get stock quantity for a specific warehouse"""
         stock = ProductWarehouseStock.objects.filter(product=self, warehouse=warehouse).first()
         return stock.quantity if stock else Decimal('0.00')
+    
+    def update_warehouse_stock(self, warehouse, quantity_change):
+        """Update stock for a specific warehouse (+ or -)"""
+        stock, created = ProductWarehouseStock.objects.get_or_create(
+            product=self,
+            warehouse=warehouse,
+            defaults={'quantity': Decimal('0.00')}
+        )
+        stock.quantity += quantity_change
+        if stock.quantity < 0:
+            stock.quantity = Decimal('0.00')
+        stock.save()
+        return stock.quantity
+    
+    def clean(self):
+        """Validate that default_bom belongs to this product"""
+        from django.core.exceptions import ValidationError
+        if self.default_bom and self.default_bom.product_id != self.pk:
+            raise ValidationError({
+                'default_bom': _("Selected BOM must belong to this product. This BOM is for: %(product)s") % {'product': self.default_bom.product.name}
+            })
     
     def save(self, *args, **kwargs):
         # Set default warehouse to first warehouse if not set
@@ -188,6 +225,7 @@ class SalesQuotation(TimeStampedModel):
         ('draft', _('Draft')),
         ('sent', _('Sent')),
         ('accepted', _('Accepted')),
+        ('converted', _('Converted to Order')),
         ('rejected', _('Rejected')),
         ('expired', _('Expired')),
     ]
@@ -528,8 +566,9 @@ class InvoiceItem(TimeStampedModel):
 
 # ==================== SALES RETURN ====================
 class SalesReturn(TimeStampedModel):
-    """Sales Return - Header/Info"""
+    """Sales Return - Header/Info (Stock IN when completed - goods returned by customer)"""
     STATUS_CHOICES = [
+        ('draft', _('Draft')),
         ('pending', _('Pending')),
         ('approved', _('Approved')),
         ('rejected', _('Rejected')),
@@ -543,14 +582,18 @@ class SalesReturn(TimeStampedModel):
     invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='returns', verbose_name=_("Invoice"))
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='sales_returns', verbose_name=_("Customer"))
     salesperson = models.ForeignKey('SalesPerson', on_delete=models.SET_NULL, null=True, blank=True, related_name='sales_returns', verbose_name=_("Sales Person"))
+    warehouse = models.ForeignKey('Warehouse', on_delete=models.PROTECT, related_name='sales_returns', verbose_name=_("Warehouse"), help_text=_("Returned goods will be added to this warehouse"))
     
-    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='pending')
+    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='draft')
     reason = models.TextField(_("Return Reason"), blank=True)
     
     # Amounts
     subtotal = models.DecimalField(_("Subtotal"), max_digits=12, decimal_places=2, default=Decimal('0.00'), editable=False)
     total_amount = models.DecimalField(_("Total Amount"), max_digits=12, decimal_places=2, default=Decimal('0.00'), editable=False)
     refund_amount = models.DecimalField(_("Refund Amount"), max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    
+    # Stock tracking
+    stock_updated = models.BooleanField(_("Stock Updated"), default=False, editable=False)
     
     notes = models.TextField(_("Notes"), blank=True)
     
@@ -570,6 +613,13 @@ class SalesReturn(TimeStampedModel):
                 self.return_number = f"SR-{last_num + 1:06d}"
             else:
                 self.return_number = "SR-000001"
+        
+        # Set default warehouse
+        if not self.warehouse_id:
+            first_warehouse = Warehouse.objects.filter(is_active=True).first()
+            if first_warehouse:
+                self.warehouse = first_warehouse
+        
         super().save(*args, **kwargs)
     
     def calculate_totals(self):
@@ -659,8 +709,9 @@ class SalesReturnItem(TimeStampedModel):
 
 # ==================== DELIVERY ====================
 class Delivery(TimeStampedModel):
-    """Delivery - Header/Info"""
+    """Delivery - Header/Info (Stock OUT when delivered)"""
     STATUS_CHOICES = [
+        ('draft', _('Draft')),
         ('pending', _('Pending')),
         ('in_transit', _('In Transit')),
         ('delivered', _('Delivered')),
@@ -673,14 +724,18 @@ class Delivery(TimeStampedModel):
     sales_order = models.ForeignKey(SalesOrder, on_delete=models.PROTECT, related_name='deliveries', verbose_name=_("Sales Order"))
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, related_name='deliveries', verbose_name=_("Customer"))
     salesperson = models.ForeignKey('SalesPerson', on_delete=models.SET_NULL, null=True, blank=True, related_name='deliveries', verbose_name=_("Sales Person"))
+    warehouse = models.ForeignKey('Warehouse', on_delete=models.PROTECT, related_name='deliveries', verbose_name=_("Warehouse"), help_text=_("Stock will be deducted from this warehouse"))
     
-    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='pending')
+    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='draft')
     
     # Delivery Details
     delivery_address = models.TextField(_("Delivery Address"), blank=True)
     tracking_number = models.CharField(_("Tracking Number"), max_length=100, blank=True)
     carrier = models.CharField(_("Carrier"), max_length=100, blank=True)
     shipping_cost = models.DecimalField(_("Shipping Cost"), max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    
+    # Stock tracking
+    stock_updated = models.BooleanField(_("Stock Updated"), default=False, editable=False, help_text=_("Whether stock has been deducted"))
     
     notes = models.TextField(_("Notes"), blank=True)
     
@@ -700,6 +755,13 @@ class Delivery(TimeStampedModel):
                 self.delivery_number = f"DL-{last_num + 1:06d}"
             else:
                 self.delivery_number = "DL-000001"
+        
+        # Set default warehouse from first item's product or first active warehouse
+        if not self.warehouse_id:
+            first_warehouse = Warehouse.objects.filter(is_active=True).first()
+            if first_warehouse:
+                self.warehouse = first_warehouse
+        
         super().save(*args, **kwargs)
 
 
@@ -786,6 +848,7 @@ class PurchaseQuotation(TimeStampedModel):
         ('sent', _('Sent')),
         ('received', _('Received')),
         ('accepted', _('Accepted')),
+        ('converted', _('Converted to Order')),
         ('rejected', _('Rejected')),
         ('expired', _('Expired')),
     ]
@@ -965,37 +1028,41 @@ class PurchaseOrderItem(TimeStampedModel):
 
 # ==================== GOODS RECEIPT (GRN) ====================
 class GoodsReceipt(TimeStampedModel):
-    """Goods Receipt Note (GRN) - Header/Info"""
+    """Goods Receipt Note (GRN) - General Stock IN (without Purchase Order)
+    
+    Use for:
+    - Opening Stock
+    - Stock Adjustment (increase)
+    - Found/Recovered items
+    - Transfer In (from other location)
+    """
     RECEIPT_TYPE_CHOICES = [
-        ('purchase', _('From Purchase Order')),
-        ('return', _('From Sales Return')),
+        ('opening', _('Opening Stock')),
         ('adjustment', _('Stock Adjustment')),
+        ('found', _('Found/Recovered')),
         ('transfer', _('Transfer In')),
+        ('other', _('Other')),
     ]
     
     STATUS_CHOICES = [
         ('draft', _('Draft')),
         ('pending', _('Pending')),
         ('received', _('Received')),
-        ('inspected', _('Inspected')),
-        ('completed', _('Completed')),
-        ('rejected', _('Rejected')),
+        ('cancelled', _('Cancelled')),
     ]
     
     receipt_number = models.CharField(_("Receipt Number"), max_length=50, unique=True, editable=False)
     receipt_date = models.DateField(_("Receipt Date"), default=timezone.now)
-    receipt_type = models.CharField(_("Receipt Type"), max_length=20, choices=RECEIPT_TYPE_CHOICES, default='purchase')
+    receipt_type = models.CharField(_("Receipt Type"), max_length=20, choices=RECEIPT_TYPE_CHOICES, default='opening')
     
-    purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, null=True, blank=True, related_name='receipts', verbose_name=_("Purchase Order"))
-    supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, null=True, blank=True, related_name='receipts', verbose_name=_("Supplier"))
+    warehouse = models.ForeignKey('Warehouse', on_delete=models.PROTECT, related_name='goods_receipts', verbose_name=_("Warehouse"))
     
     status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='draft')
     
-    # Receipt Details
     received_by = models.CharField(_("Received By"), max_length=100, blank=True)
-    warehouse_location = models.CharField(_("Warehouse Location"), max_length=100, blank=True, default="Main Warehouse")
     reference = models.CharField(_("Reference"), max_length=100, blank=True)
     
+    stock_updated = models.BooleanField(_("Stock Updated"), default=False, editable=False)
     notes = models.TextField(_("Notes"), blank=True)
     
     class Meta:
@@ -1004,21 +1071,27 @@ class GoodsReceipt(TimeStampedModel):
         ordering = ['-receipt_date', '-created_at']
     
     def __str__(self):
-        return f"{self.receipt_number} - {self.receipt_type}"
+        return f"{self.receipt_number} - {self.get_receipt_type_display()}"
     
     def save(self, *args, **kwargs):
         if not self.receipt_number:
-            last_receipt = GoodsReceipt.objects.order_by('-id').first()
-            if last_receipt:
-                last_num = int(last_receipt.receipt_number.split('-')[-1])
+            last = GoodsReceipt.objects.order_by('-id').first()
+            if last:
+                last_num = int(last.receipt_number.split('-')[-1])
                 self.receipt_number = f"GRN-{last_num + 1:06d}"
             else:
                 self.receipt_number = "GRN-000001"
+        
+        if not self.warehouse_id:
+            first_warehouse = Warehouse.objects.filter(is_active=True).first()
+            if first_warehouse:
+                self.warehouse = first_warehouse
+        
         super().save(*args, **kwargs)
 
 
 class GoodsReceiptItem(TimeStampedModel):
-    """Goods Receipt Item - Line Item"""
+    """Goods Receipt Item - Line Item (General)"""
     goods_receipt = models.ForeignKey(GoodsReceipt, on_delete=models.CASCADE, related_name='items', verbose_name=_("Goods Receipt"))
     product = models.ForeignKey(Product, on_delete=models.PROTECT, verbose_name=_("Product"))
     
@@ -1034,61 +1107,142 @@ class GoodsReceiptItem(TimeStampedModel):
     def __str__(self):
         return f"{self.goods_receipt.receipt_number} - {self.product.name}"
     
+    def save(self, *args, **kwargs):
+        if self.unit_price == Decimal('0.00') and self.product:
+            self.unit_price = self.product.purchase_price
+        self.line_total = self.quantity * self.unit_price
+        super().save(*args, **kwargs)
+
+
+# ==================== GOODS RECEIPT PO (FROM PURCHASE ORDER) ====================
+class GoodsReceiptPO(TimeStampedModel):
+    """Goods Receipt from Purchase Order - Stock IN when received from supplier"""
+    STATUS_CHOICES = [
+        ('draft', _('Draft')),
+        ('pending', _('Pending')),
+        ('partial', _('Partially Received')),
+        ('received', _('Received')),
+        ('inspected', _('Inspected')),
+        ('completed', _('Completed')),
+        ('rejected', _('Rejected')),
+    ]
+    
+    receipt_number = models.CharField(_("Receipt Number"), max_length=50, unique=True, editable=False)
+    receipt_date = models.DateField(_("Receipt Date"), default=timezone.now)
+    
+    purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, related_name='goods_receipts_po', verbose_name=_("Purchase Order"))
+    supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name='goods_receipts_po', verbose_name=_("Supplier"))
+    warehouse = models.ForeignKey('Warehouse', on_delete=models.PROTECT, related_name='goods_receipts_po', verbose_name=_("Warehouse"))
+    
+    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='draft')
+    
+    received_by = models.CharField(_("Received By"), max_length=100, blank=True)
+    inspected_by = models.CharField(_("Inspected By"), max_length=100, blank=True)
+    reference = models.CharField(_("Reference"), max_length=100, blank=True)
+    supplier_delivery_note = models.CharField(_("Supplier Delivery Note"), max_length=100, blank=True)
+    
+    stock_updated = models.BooleanField(_("Stock Updated"), default=False, editable=False)
+    notes = models.TextField(_("Notes"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Goods Receipt (PO)")
+        verbose_name_plural = _("Goods Receipts (PO)")
+        ordering = ['-receipt_date', '-created_at']
+    
+    def __str__(self):
+        return f"{self.receipt_number} - PO:{self.purchase_order.order_number}"
+    
+    def save(self, *args, **kwargs):
+        if not self.receipt_number:
+            last = GoodsReceiptPO.objects.order_by('-id').first()
+            if last:
+                last_num = int(last.receipt_number.split('-')[-1])
+                self.receipt_number = f"GRPO-{last_num + 1:06d}"
+            else:
+                self.receipt_number = "GRPO-000001"
+        
+        # Auto-fill supplier from PO
+        if not self.supplier_id and self.purchase_order:
+            self.supplier = self.purchase_order.supplier
+        
+        if not self.warehouse_id:
+            first_warehouse = Warehouse.objects.filter(is_active=True).first()
+            if first_warehouse:
+                self.warehouse = first_warehouse
+        
+        super().save(*args, **kwargs)
+
+
+class GoodsReceiptPOItem(TimeStampedModel):
+    """Goods Receipt PO Item - Line Item"""
+    goods_receipt_po = models.ForeignKey(GoodsReceiptPO, on_delete=models.CASCADE, related_name='items', verbose_name=_("Goods Receipt PO"))
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, verbose_name=_("Product"))
+    
+    ordered_quantity = models.DecimalField(_("Ordered Qty"), max_digits=10, decimal_places=2, default=Decimal('0.00'), editable=False)
+    received_quantity = models.DecimalField(_("Received Qty"), max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
+    rejected_quantity = models.DecimalField(_("Rejected Qty"), max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    accepted_quantity = models.DecimalField(_("Accepted Qty"), max_digits=10, decimal_places=2, default=Decimal('0.00'), editable=False)
+    
+    unit_price = models.DecimalField(_("Unit Price"), max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    line_total = models.DecimalField(_("Line Total"), max_digits=12, decimal_places=2, default=Decimal('0.00'), editable=False)
+    
+    rejection_reason = models.CharField(_("Rejection Reason"), max_length=200, blank=True)
+    
+    class Meta:
+        verbose_name = _("Goods Receipt PO Item")
+        verbose_name_plural = _("Goods Receipt PO Items")
+        ordering = ['id']
+    
+    def __str__(self):
+        return f"{self.goods_receipt_po.receipt_number} - {self.product.name}"
+    
     def get_purchase_order_item(self):
-        """Find matching purchase order item by product"""
-        if self.goods_receipt.purchase_order:
-            return self.goods_receipt.purchase_order.items.filter(product=self.product).first()
-        return None
+        """Find matching purchase order item"""
+        return self.goods_receipt_po.purchase_order.items.filter(product=self.product).first()
     
     @property
-    def purchase_order_item(self):
-        """Get purchase order item for this product"""
-        return self.get_purchase_order_item()
-    
-    @property
-    def available_quantity(self):
-        """Get available quantity from purchase order"""
+    def remaining_to_receive(self):
+        """Calculate remaining quantity to receive from PO"""
         po_item = self.get_purchase_order_item()
         if po_item:
-            return po_item.remaining_to_receive
+            # Get total already received for this product
+            from django.db.models import Sum
+            total_received = GoodsReceiptPOItem.objects.filter(
+                goods_receipt_po__purchase_order=self.goods_receipt_po.purchase_order,
+                product=self.product,
+                goods_receipt_po__status__in=['received', 'inspected', 'completed']
+            ).exclude(pk=self.pk).aggregate(total=Sum('accepted_quantity'))['total'] or Decimal('0.00')
+            return po_item.quantity - total_received
         return Decimal('0.00')
     
     def clean(self):
-        """Validate receipt quantity"""
         from django.core.exceptions import ValidationError
         
-        if not self.goods_receipt.purchase_order:
-            raise ValidationError('Goods Receipt must have a Purchase Order.')
-        
-        # Find matching purchase order item
         po_item = self.get_purchase_order_item()
         if not po_item:
             raise ValidationError({
-                'product': f'Product "{self.product.name}" is not in Purchase Order {self.goods_receipt.purchase_order.order_number}.'
+                'product': f'Product "{self.product.name}" is not in Purchase Order.'
             })
         
-        # Check if quantity exceeds available
-        from django.db.models import Sum
-        other_receipts = GoodsReceiptItem.objects.filter(
-            goods_receipt__purchase_order=self.goods_receipt.purchase_order,
-            product=self.product
-        ).exclude(pk=self.pk).aggregate(total=Sum('quantity'))['total'] or Decimal('0.00')
-        
-        total_received = other_receipts + self.quantity
-        
-        if total_received > po_item.quantity:
+        if self.received_quantity > self.remaining_to_receive + (self.accepted_quantity if self.pk else Decimal('0')):
             raise ValidationError({
-                'quantity': f'Cannot receive {self.quantity}. Only {po_item.remaining_to_receive} remaining for this product.'
+                'received_quantity': f'Cannot receive {self.received_quantity}. Only {self.remaining_to_receive} remaining.'
             })
     
     def save(self, *args, **kwargs):
-        # Auto-set unit price from purchase order if not set
-        if self.unit_price == Decimal('0.00'):
-            po_item = self.get_purchase_order_item()
-            if po_item:
+        # Auto-fill from PO item
+        po_item = self.get_purchase_order_item()
+        if po_item:
+            self.ordered_quantity = po_item.quantity
+            if self.unit_price == Decimal('0.00'):
                 self.unit_price = po_item.unit_price
         
-        self.line_total = self.quantity * self.unit_price
+        # Calculate accepted quantity
+        self.accepted_quantity = self.received_quantity - self.rejected_quantity
+        if self.accepted_quantity < 0:
+            self.accepted_quantity = Decimal('0.00')
+        
+        self.line_total = self.accepted_quantity * self.unit_price
         super().save(*args, **kwargs)
 
 
@@ -1222,8 +1376,9 @@ class PurchaseInvoiceItem(TimeStampedModel):
 
 # ==================== PURCHASE RETURN ====================
 class PurchaseReturn(TimeStampedModel):
-    """Purchase Return - Header/Info"""
+    """Purchase Return - Header/Info (Stock OUT when completed - goods returned to supplier)"""
     STATUS_CHOICES = [
+        ('draft', _('Draft')),
         ('pending', _('Pending')),
         ('approved', _('Approved')),
         ('rejected', _('Rejected')),
@@ -1235,14 +1390,18 @@ class PurchaseReturn(TimeStampedModel):
     
     purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, related_name='returns', verbose_name=_("Purchase Order"))
     supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name='purchase_returns', verbose_name=_("Supplier"))
+    warehouse = models.ForeignKey('Warehouse', on_delete=models.PROTECT, related_name='purchase_returns', verbose_name=_("Warehouse"), help_text=_("Stock will be deducted from this warehouse"))
     
-    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='pending')
+    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='draft')
     reason = models.TextField(_("Return Reason"), blank=True)
     
     # Amounts
     subtotal = models.DecimalField(_("Subtotal"), max_digits=12, decimal_places=2, default=Decimal('0.00'), editable=False)
     total_amount = models.DecimalField(_("Total Amount"), max_digits=12, decimal_places=2, default=Decimal('0.00'), editable=False)
     refund_amount = models.DecimalField(_("Refund Amount"), max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    
+    # Stock tracking
+    stock_updated = models.BooleanField(_("Stock Updated"), default=False, editable=False)
     
     notes = models.TextField(_("Notes"), blank=True)
     
@@ -1255,6 +1414,12 @@ class PurchaseReturn(TimeStampedModel):
         return f"{self.return_number} - {self.supplier.name}"
     
     def save(self, *args, **kwargs):
+        # Set default warehouse
+        if not self.warehouse_id:
+            first_warehouse = Warehouse.objects.filter(is_active=True).first()
+            if first_warehouse:
+                self.warehouse = first_warehouse
+        
         if not self.return_number:
             last_return = PurchaseReturn.objects.order_by('-id').first()
             if last_return:
@@ -1376,6 +1541,7 @@ class BillOfMaterials(TimeStampedModel):
                 self.bom_number = f"BOM-{last_num + 1:06d}"
             else:
                 self.bom_number = "BOM-000001"
+        
         super().save(*args, **kwargs)
     
     def calculate_costs(self):
@@ -1598,13 +1764,14 @@ class ProductionReceiptComponent(TimeStampedModel):
 
 # ==================== GOODS ISSUE ====================
 class GoodsIssue(TimeStampedModel):
-    """Goods Issue - Header/Info"""
+    """Goods Issue - Header/Info (Stock OUT when issued)"""
     ISSUE_TYPE_CHOICES = [
         ('sales', _('For Sales Order')),
         ('production', _('For Production')),
         ('adjustment', _('Stock Adjustment')),
         ('transfer', _('Transfer Out')),
         ('damage', _('Damage/Loss')),
+        ('internal', _('Internal Use')),
     ]
     
     STATUS_CHOICES = [
@@ -1621,13 +1788,17 @@ class GoodsIssue(TimeStampedModel):
     
     sales_order = models.ForeignKey(SalesOrder, on_delete=models.PROTECT, null=True, blank=True, related_name='goods_issues', verbose_name=_("Sales Order"))
     customer = models.ForeignKey(Customer, on_delete=models.PROTECT, null=True, blank=True, related_name='goods_issues', verbose_name=_("Customer"))
+    warehouse = models.ForeignKey('Warehouse', on_delete=models.PROTECT, related_name='goods_issues', verbose_name=_("Warehouse"), help_text=_("Stock will be deducted from this warehouse"))
     
     status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='draft')
     
     # Issue Details
     issued_by = models.CharField(_("Issued By"), max_length=100, blank=True)
-    warehouse_location = models.CharField(_("Warehouse Location"), max_length=100, blank=True, default="Main Warehouse")
+    issued_to = models.CharField(_("Issued To"), max_length=100, blank=True)
     reference = models.CharField(_("Reference"), max_length=100, blank=True)
+    
+    # Stock tracking
+    stock_updated = models.BooleanField(_("Stock Updated"), default=False, editable=False, help_text=_("Whether stock has been deducted"))
     
     notes = models.TextField(_("Notes"), blank=True)
     
@@ -1637,7 +1808,7 @@ class GoodsIssue(TimeStampedModel):
         ordering = ['-issue_date', '-created_at']
     
     def __str__(self):
-        return f"{self.issue_number} - {self.issue_type}"
+        return f"{self.issue_number} - {self.get_issue_type_display()}"
     
     def save(self, *args, **kwargs):
         if not self.issue_number:
@@ -1647,6 +1818,13 @@ class GoodsIssue(TimeStampedModel):
                 self.issue_number = f"GI-{last_num + 1:06d}"
             else:
                 self.issue_number = "GI-000001"
+        
+        # Set default warehouse
+        if not self.warehouse_id:
+            first_warehouse = Warehouse.objects.filter(is_active=True).first()
+            if first_warehouse:
+                self.warehouse = first_warehouse
+        
         super().save(*args, **kwargs)
 
 
@@ -2335,3 +2513,911 @@ class Budget(TimeStampedModel):
         if self.budget_amount > 0:
             return (self.actual_amount / self.budget_amount) * 100
         return Decimal('0.00')
+
+
+# ==================== CURRENCY & EXCHANGE RATE ====================
+
+class Currency(TimeStampedModel):
+    """Currency Master"""
+    code = models.CharField(_("Currency Code"), max_length=3, unique=True, help_text=_("ISO 4217 code (e.g., USD, BDT, EUR)"))
+    name = models.CharField(_("Currency Name"), max_length=100)
+    symbol = models.CharField(_("Symbol"), max_length=10, help_text=_("e.g., $, ৳, €"))
+    decimal_places = models.PositiveSmallIntegerField(_("Decimal Places"), default=2)
+    is_base_currency = models.BooleanField(_("Base Currency"), default=False, help_text=_("Only one currency can be base"))
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Currency")
+        verbose_name_plural = _("Currencies")
+        ordering = ['-is_base_currency', 'code']
+    
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+    
+    def save(self, *args, **kwargs):
+        # Ensure only one base currency
+        if self.is_base_currency:
+            Currency.objects.filter(is_base_currency=True).exclude(pk=self.pk).update(is_base_currency=False)
+        super().save(*args, **kwargs)
+
+
+class ExchangeRate(TimeStampedModel):
+    """Exchange Rate for Currency Conversion"""
+    from_currency = models.ForeignKey(Currency, on_delete=models.PROTECT, related_name='rates_from', verbose_name=_("From Currency"))
+    to_currency = models.ForeignKey(Currency, on_delete=models.PROTECT, related_name='rates_to', verbose_name=_("To Currency"))
+    rate = models.DecimalField(_("Exchange Rate"), max_digits=18, decimal_places=6, validators=[MinValueValidator(Decimal('0.000001'))])
+    effective_date = models.DateField(_("Effective Date"), default=timezone.now)
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Exchange Rate")
+        verbose_name_plural = _("Exchange Rates")
+        ordering = ['-effective_date', 'from_currency']
+        unique_together = ['from_currency', 'to_currency', 'effective_date']
+    
+    def __str__(self):
+        return f"1 {self.from_currency.code} = {self.rate} {self.to_currency.code} ({self.effective_date})"
+    
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.from_currency == self.to_currency:
+            raise ValidationError(_("From and To currency cannot be the same."))
+
+
+# ==================== TAX CONFIGURATION ====================
+
+class TaxType(TimeStampedModel):
+    """Tax Type Master (VAT, GST, etc.)"""
+    TAX_CATEGORY_CHOICES = [
+        ('sales', _('Sales Tax')),
+        ('purchase', _('Purchase Tax')),
+        ('both', _('Both Sales & Purchase')),
+    ]
+    
+    name = models.CharField(_("Tax Name"), max_length=100, unique=True)
+    code = models.CharField(_("Tax Code"), max_length=20, unique=True)
+    category = models.CharField(_("Category"), max_length=20, choices=TAX_CATEGORY_CHOICES, default='both')
+    description = models.TextField(_("Description"), blank=True)
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    # Accounting Integration
+    sales_account = models.ForeignKey(ChartOfAccounts, on_delete=models.SET_NULL, null=True, blank=True, related_name='sales_tax_types', verbose_name=_("Sales Tax Account"))
+    purchase_account = models.ForeignKey(ChartOfAccounts, on_delete=models.SET_NULL, null=True, blank=True, related_name='purchase_tax_types', verbose_name=_("Purchase Tax Account"))
+    
+    class Meta:
+        verbose_name = _("Tax Type")
+        verbose_name_plural = _("Tax Types")
+        ordering = ['name']
+    
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
+class TaxRate(TimeStampedModel):
+    """Tax Rate Configuration"""
+    tax_type = models.ForeignKey(TaxType, on_delete=models.PROTECT, related_name='rates', verbose_name=_("Tax Type"))
+    name = models.CharField(_("Rate Name"), max_length=100, help_text=_("e.g., Standard Rate, Reduced Rate"))
+    rate = models.DecimalField(_("Rate (%)"), max_digits=5, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
+    is_default = models.BooleanField(_("Default Rate"), default=False)
+    is_active = models.BooleanField(_("Active"), default=True)
+    effective_from = models.DateField(_("Effective From"), default=timezone.now)
+    effective_to = models.DateField(_("Effective To"), null=True, blank=True)
+    
+    class Meta:
+        verbose_name = _("Tax Rate")
+        verbose_name_plural = _("Tax Rates")
+        ordering = ['tax_type', '-is_default', 'rate']
+    
+    def __str__(self):
+        return f"{self.tax_type.code} - {self.name} ({self.rate}%)"
+    
+    def save(self, *args, **kwargs):
+        # Ensure only one default rate per tax type
+        if self.is_default:
+            TaxRate.objects.filter(tax_type=self.tax_type, is_default=True).exclude(pk=self.pk).update(is_default=False)
+        super().save(*args, **kwargs)
+
+
+# ==================== PAYMENT TERMS ====================
+
+class PaymentTerm(TimeStampedModel):
+    """Payment Terms Master"""
+    name = models.CharField(_("Term Name"), max_length=100, unique=True)
+    code = models.CharField(_("Term Code"), max_length=20, unique=True)
+    days = models.PositiveIntegerField(_("Days"), default=0, help_text=_("Number of days for payment"))
+    description = models.TextField(_("Description"), blank=True)
+    is_default = models.BooleanField(_("Default"), default=False)
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    # Discount for early payment
+    discount_days = models.PositiveIntegerField(_("Discount Days"), default=0, help_text=_("Days within which discount applies"))
+    discount_percentage = models.DecimalField(_("Discount (%)"), max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    
+    class Meta:
+        verbose_name = _("Payment Term")
+        verbose_name_plural = _("Payment Terms")
+        ordering = ['days', 'name']
+    
+    def __str__(self):
+        if self.days == 0:
+            return f"{self.code} - {self.name} (Immediate)"
+        return f"{self.code} - {self.name} ({self.days} days)"
+    
+    def save(self, *args, **kwargs):
+        if self.is_default:
+            PaymentTerm.objects.filter(is_default=True).exclude(pk=self.pk).update(is_default=False)
+        super().save(*args, **kwargs)
+
+
+# ==================== UNIT OF MEASURE (UOM) ====================
+
+class UnitOfMeasure(TimeStampedModel):
+    """Unit of Measure Master"""
+    UOM_TYPE_CHOICES = [
+        ('unit', _('Unit')),
+        ('weight', _('Weight')),
+        ('volume', _('Volume')),
+        ('length', _('Length')),
+        ('area', _('Area')),
+        ('time', _('Time')),
+    ]
+    
+    name = models.CharField(_("Unit Name"), max_length=50, unique=True)
+    code = models.CharField(_("Unit Code"), max_length=10, unique=True)
+    uom_type = models.CharField(_("Type"), max_length=20, choices=UOM_TYPE_CHOICES, default='unit')
+    is_base_unit = models.BooleanField(_("Base Unit"), default=False, help_text=_("Base unit for this type"))
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Unit of Measure")
+        verbose_name_plural = _("Units of Measure")
+        ordering = ['uom_type', 'name']
+    
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
+class UOMConversion(TimeStampedModel):
+    """UOM Conversion Rules"""
+    from_uom = models.ForeignKey(UnitOfMeasure, on_delete=models.PROTECT, related_name='conversions_from', verbose_name=_("From UOM"))
+    to_uom = models.ForeignKey(UnitOfMeasure, on_delete=models.PROTECT, related_name='conversions_to', verbose_name=_("To UOM"))
+    conversion_factor = models.DecimalField(_("Conversion Factor"), max_digits=18, decimal_places=6, validators=[MinValueValidator(Decimal('0.000001'))], help_text=_("1 From UOM = X To UOM"))
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("UOM Conversion")
+        verbose_name_plural = _("UOM Conversions")
+        unique_together = ['from_uom', 'to_uom']
+        ordering = ['from_uom', 'to_uom']
+    
+    def __str__(self):
+        return f"1 {self.from_uom.code} = {self.conversion_factor} {self.to_uom.code}"
+    
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.from_uom == self.to_uom:
+            raise ValidationError(_("From and To UOM cannot be the same."))
+
+
+# ==================== PRICE LIST ====================
+
+class PriceList(TimeStampedModel):
+    """Price List Master"""
+    PRICE_TYPE_CHOICES = [
+        ('sales', _('Sales Price')),
+        ('purchase', _('Purchase Price')),
+    ]
+    
+    name = models.CharField(_("Price List Name"), max_length=100, unique=True)
+    code = models.CharField(_("Price List Code"), max_length=20, unique=True)
+    price_type = models.CharField(_("Price Type"), max_length=20, choices=PRICE_TYPE_CHOICES, default='sales')
+    currency = models.ForeignKey(Currency, on_delete=models.PROTECT, related_name='price_lists', verbose_name=_("Currency"), null=True, blank=True)
+    
+    is_default = models.BooleanField(_("Default"), default=False)
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    # Validity
+    valid_from = models.DateField(_("Valid From"), default=timezone.now)
+    valid_to = models.DateField(_("Valid To"), null=True, blank=True)
+    
+    description = models.TextField(_("Description"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Price List")
+        verbose_name_plural = _("Price Lists")
+        ordering = ['price_type', '-is_default', 'name']
+    
+    def __str__(self):
+        return f"{self.code} - {self.name} ({self.get_price_type_display()})"
+    
+    def save(self, *args, **kwargs):
+        if self.is_default:
+            PriceList.objects.filter(price_type=self.price_type, is_default=True).exclude(pk=self.pk).update(is_default=False)
+        super().save(*args, **kwargs)
+
+
+class PriceListItem(TimeStampedModel):
+    """Price List Item - Product Prices"""
+    price_list = models.ForeignKey(PriceList, on_delete=models.CASCADE, related_name='items', verbose_name=_("Price List"))
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='price_list_items', verbose_name=_("Product"))
+    
+    unit_price = models.DecimalField(_("Unit Price"), max_digits=15, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
+    min_quantity = models.DecimalField(_("Minimum Quantity"), max_digits=10, decimal_places=2, default=Decimal('1.00'), help_text=_("Minimum quantity for this price"))
+    
+    # Optional discount
+    discount_percentage = models.DecimalField(_("Discount (%)"), max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Price List Item")
+        verbose_name_plural = _("Price List Items")
+        unique_together = ['price_list', 'product', 'min_quantity']
+        ordering = ['price_list', 'product', 'min_quantity']
+    
+    def __str__(self):
+        return f"{self.price_list.code} - {self.product.name}: {self.unit_price}"
+    
+    @property
+    def net_price(self):
+        """Calculate net price after discount"""
+        if self.discount_percentage > 0:
+            discount = self.unit_price * (self.discount_percentage / Decimal('100'))
+            return self.unit_price - discount
+        return self.unit_price
+
+
+# ==================== DISCOUNT MANAGEMENT ====================
+
+class DiscountType(TimeStampedModel):
+    """Discount Type Master"""
+    DISCOUNT_METHOD_CHOICES = [
+        ('percentage', _('Percentage')),
+        ('fixed', _('Fixed Amount')),
+    ]
+    
+    APPLY_ON_CHOICES = [
+        ('order', _('Whole Order')),
+        ('product', _('Specific Product')),
+        ('category', _('Product Category')),
+        ('customer', _('Specific Customer')),
+        ('customer_group', _('Customer Group')),
+    ]
+    
+    name = models.CharField(_("Discount Name"), max_length=100, unique=True)
+    code = models.CharField(_("Discount Code"), max_length=20, unique=True)
+    discount_method = models.CharField(_("Method"), max_length=20, choices=DISCOUNT_METHOD_CHOICES, default='percentage')
+    apply_on = models.CharField(_("Apply On"), max_length=20, choices=APPLY_ON_CHOICES, default='order')
+    
+    value = models.DecimalField(_("Value"), max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], help_text=_("Percentage or Fixed Amount"))
+    max_discount_amount = models.DecimalField(_("Max Discount Amount"), max_digits=10, decimal_places=2, null=True, blank=True, help_text=_("Maximum discount cap for percentage"))
+    min_order_amount = models.DecimalField(_("Min Order Amount"), max_digits=10, decimal_places=2, default=Decimal('0.00'), help_text=_("Minimum order value to apply discount"))
+    
+    # Validity
+    valid_from = models.DateField(_("Valid From"), default=timezone.now)
+    valid_to = models.DateField(_("Valid To"), null=True, blank=True)
+    
+    # Usage limits
+    usage_limit = models.PositiveIntegerField(_("Usage Limit"), null=True, blank=True, help_text=_("Total times this discount can be used"))
+    usage_count = models.PositiveIntegerField(_("Usage Count"), default=0, editable=False)
+    per_customer_limit = models.PositiveIntegerField(_("Per Customer Limit"), null=True, blank=True)
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    description = models.TextField(_("Description"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Discount Type")
+        verbose_name_plural = _("Discount Types")
+        ordering = ['name']
+    
+    def __str__(self):
+        if self.discount_method == 'percentage':
+            return f"{self.code} - {self.name} ({self.value}%)"
+        return f"{self.code} - {self.name} ({self.value} fixed)"
+    
+    def is_valid(self):
+        """Check if discount is currently valid"""
+        from django.utils import timezone
+        today = timezone.now().date()
+        if not self.is_active:
+            return False
+        if self.valid_from and today < self.valid_from:
+            return False
+        if self.valid_to and today > self.valid_to:
+            return False
+        if self.usage_limit and self.usage_count >= self.usage_limit:
+            return False
+        return True
+    
+    def calculate_discount(self, amount):
+        """Calculate discount amount"""
+        if self.discount_method == 'percentage':
+            discount = amount * (self.value / Decimal('100'))
+            if self.max_discount_amount:
+                discount = min(discount, self.max_discount_amount)
+            return discount
+        return min(self.value, amount)
+
+
+class DiscountRule(TimeStampedModel):
+    """Discount Rules - Conditions for applying discounts"""
+    discount_type = models.ForeignKey(DiscountType, on_delete=models.CASCADE, related_name='rules', verbose_name=_("Discount Type"))
+    
+    # Conditions
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, null=True, blank=True, related_name='discount_rules', verbose_name=_("Product"))
+    category = models.ForeignKey(Category, on_delete=models.CASCADE, null=True, blank=True, related_name='discount_rules', verbose_name=_("Category"))
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, null=True, blank=True, related_name='discount_rules', verbose_name=_("Customer"))
+    
+    min_quantity = models.DecimalField(_("Min Quantity"), max_digits=10, decimal_places=2, default=Decimal('1.00'))
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Discount Rule")
+        verbose_name_plural = _("Discount Rules")
+        ordering = ['discount_type', 'id']
+    
+    def __str__(self):
+        return f"{self.discount_type.code} - Rule #{self.id}"
+
+
+# ==================== STOCK ADJUSTMENT ====================
+
+class StockAdjustment(TimeStampedModel):
+    """Stock Adjustment - Header/Info"""
+    ADJUSTMENT_TYPE_CHOICES = [
+        ('opening', _('Opening Stock')),
+        ('physical_count', _('Physical Count')),
+        ('damage', _('Damage/Loss')),
+        ('correction', _('Correction')),
+        ('write_off', _('Write Off')),
+        ('found', _('Found/Recovered')),
+    ]
+    
+    STATUS_CHOICES = [
+        ('draft', _('Draft')),
+        ('pending', _('Pending Approval')),
+        ('approved', _('Approved')),
+        ('posted', _('Posted')),
+        ('rejected', _('Rejected')),
+        ('cancelled', _('Cancelled')),
+    ]
+    
+    adjustment_number = models.CharField(_("Adjustment Number"), max_length=50, unique=True, editable=False)
+    adjustment_date = models.DateField(_("Adjustment Date"), default=timezone.now)
+    adjustment_type = models.CharField(_("Adjustment Type"), max_length=20, choices=ADJUSTMENT_TYPE_CHOICES, default='physical_count')
+    
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name='stock_adjustments', verbose_name=_("Warehouse"))
+    
+    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='draft')
+    reason = models.TextField(_("Reason"), blank=True)
+    
+    # Approval
+    requested_by = models.CharField(_("Requested By"), max_length=100, blank=True)
+    approved_by = models.CharField(_("Approved By"), max_length=100, blank=True)
+    approved_date = models.DateTimeField(_("Approved Date"), null=True, blank=True)
+    
+    # Totals
+    total_increase = models.DecimalField(_("Total Increase"), max_digits=12, decimal_places=2, default=Decimal('0.00'), editable=False)
+    total_decrease = models.DecimalField(_("Total Decrease"), max_digits=12, decimal_places=2, default=Decimal('0.00'), editable=False)
+    total_value = models.DecimalField(_("Total Value"), max_digits=15, decimal_places=2, default=Decimal('0.00'), editable=False)
+    
+    notes = models.TextField(_("Notes"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Stock Adjustment")
+        verbose_name_plural = _("Stock Adjustments")
+        ordering = ['-adjustment_date', '-created_at']
+    
+    def __str__(self):
+        return f"{self.adjustment_number} - {self.get_adjustment_type_display()}"
+    
+    def save(self, *args, **kwargs):
+        if not self.adjustment_number:
+            last = StockAdjustment.objects.order_by('-id').first()
+            if last:
+                last_num = int(last.adjustment_number.split('-')[-1])
+                self.adjustment_number = f"ADJ-{last_num + 1:06d}"
+            else:
+                self.adjustment_number = "ADJ-000001"
+        super().save(*args, **kwargs)
+    
+    def calculate_totals(self):
+        """Calculate totals from items"""
+        items = self.items.all()
+        self.total_increase = sum(item.quantity_difference for item in items if item.quantity_difference > 0)
+        self.total_decrease = abs(sum(item.quantity_difference for item in items if item.quantity_difference < 0))
+        self.total_value = sum(item.value_difference for item in items)
+        self.save(update_fields=['total_increase', 'total_decrease', 'total_value'])
+
+
+class StockAdjustmentItem(TimeStampedModel):
+    """Stock Adjustment Item - Line Item"""
+    stock_adjustment = models.ForeignKey(StockAdjustment, on_delete=models.CASCADE, related_name='items', verbose_name=_("Stock Adjustment"))
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, verbose_name=_("Product"))
+    
+    system_quantity = models.DecimalField(_("System Quantity"), max_digits=10, decimal_places=2, default=Decimal('0.00'), editable=False, help_text=_("Current stock in system (auto-filled)"))
+    actual_quantity = models.DecimalField(_("Actual/New Quantity"), max_digits=10, decimal_places=2, default=Decimal('0.00'), help_text=_("Enter the actual/new quantity"))
+    quantity_difference = models.DecimalField(_("Difference"), max_digits=10, decimal_places=2, default=Decimal('0.00'), editable=False)
+    
+    unit_cost = models.DecimalField(_("Unit Cost"), max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    value_difference = models.DecimalField(_("Value Difference"), max_digits=12, decimal_places=2, default=Decimal('0.00'), editable=False)
+    
+    reason = models.CharField(_("Item Reason"), max_length=200, blank=True)
+    
+    class Meta:
+        verbose_name = _("Stock Adjustment Item")
+        verbose_name_plural = _("Stock Adjustment Items")
+        ordering = ['id']
+    
+    def __str__(self):
+        return f"{self.stock_adjustment.adjustment_number} - {self.product.name}"
+    
+    def save(self, *args, **kwargs):
+        # Auto-set system quantity from current warehouse stock
+        if self.product and self.stock_adjustment.warehouse:
+            warehouse_stock = ProductWarehouseStock.objects.filter(
+                product=self.product, 
+                warehouse=self.stock_adjustment.warehouse
+            ).first()
+            self.system_quantity = warehouse_stock.quantity if warehouse_stock else Decimal('0.00')
+        
+        # Auto-set unit cost from product if not set
+        if self.unit_cost == Decimal('0.00') and self.product:
+            self.unit_cost = self.product.purchase_price
+        
+        # Calculate difference (actual - system)
+        self.quantity_difference = self.actual_quantity - self.system_quantity
+        self.value_difference = self.quantity_difference * self.unit_cost
+        
+        super().save(*args, **kwargs)
+        self.stock_adjustment.calculate_totals()
+
+
+# ==================== APPROVAL WORKFLOW ====================
+
+class ApprovalWorkflow(TimeStampedModel):
+    """Approval Workflow Configuration"""
+    DOCUMENT_TYPE_CHOICES = [
+        ('sales_quotation', _('Sales Quotation')),
+        ('sales_order', _('Sales Order')),
+        ('purchase_quotation', _('Purchase Quotation')),
+        ('purchase_order', _('Purchase Order')),
+        ('invoice', _('Invoice')),
+        ('purchase_invoice', _('Purchase Invoice')),
+        ('stock_adjustment', _('Stock Adjustment')),
+        ('journal_entry', _('Journal Entry')),
+        ('payment', _('Payment')),
+    ]
+    
+    name = models.CharField(_("Workflow Name"), max_length=100)
+    document_type = models.CharField(_("Document Type"), max_length=30, choices=DOCUMENT_TYPE_CHOICES, unique=True)
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    description = models.TextField(_("Description"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Approval Workflow")
+        verbose_name_plural = _("Approval Workflows")
+        ordering = ['document_type']
+    
+    def __str__(self):
+        return f"{self.name} ({self.get_document_type_display()})"
+
+
+class ApprovalLevel(TimeStampedModel):
+    """Approval Levels within a Workflow"""
+    workflow = models.ForeignKey(ApprovalWorkflow, on_delete=models.CASCADE, related_name='levels', verbose_name=_("Workflow"))
+    
+    level = models.PositiveSmallIntegerField(_("Level"), default=1)
+    name = models.CharField(_("Level Name"), max_length=100)
+    
+    # Conditions
+    min_amount = models.DecimalField(_("Min Amount"), max_digits=15, decimal_places=2, default=Decimal('0.00'))
+    max_amount = models.DecimalField(_("Max Amount"), max_digits=15, decimal_places=2, null=True, blank=True)
+    
+    # Approvers (can be user or role based)
+    approver_user = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='approval_levels', verbose_name=_("Approver User"))
+    approver_role = models.CharField(_("Approver Role"), max_length=100, blank=True, help_text=_("Role/Group name for approval"))
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Approval Level")
+        verbose_name_plural = _("Approval Levels")
+        ordering = ['workflow', 'level']
+        unique_together = ['workflow', 'level']
+    
+    def __str__(self):
+        return f"{self.workflow.name} - Level {self.level}: {self.name}"
+
+
+class ApprovalRequest(TimeStampedModel):
+    """Approval Request - Tracks approval status for documents"""
+    STATUS_CHOICES = [
+        ('pending', _('Pending')),
+        ('approved', _('Approved')),
+        ('rejected', _('Rejected')),
+        ('cancelled', _('Cancelled')),
+    ]
+    
+    workflow = models.ForeignKey(ApprovalWorkflow, on_delete=models.PROTECT, related_name='requests', verbose_name=_("Workflow"))
+    
+    # Generic relation to any document
+    document_type = models.CharField(_("Document Type"), max_length=30)
+    document_id = models.PositiveIntegerField(_("Document ID"))
+    document_number = models.CharField(_("Document Number"), max_length=50)
+    document_amount = models.DecimalField(_("Document Amount"), max_digits=15, decimal_places=2, default=Decimal('0.00'))
+    
+    current_level = models.PositiveSmallIntegerField(_("Current Level"), default=1)
+    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    requested_by = models.ForeignKey('auth.User', on_delete=models.PROTECT, related_name='approval_requests', verbose_name=_("Requested By"))
+    requested_date = models.DateTimeField(_("Requested Date"), auto_now_add=True)
+    
+    notes = models.TextField(_("Notes"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Approval Request")
+        verbose_name_plural = _("Approval Requests")
+        ordering = ['-requested_date']
+    
+    def __str__(self):
+        return f"{self.document_number} - {self.get_status_display()}"
+
+
+class ApprovalHistory(TimeStampedModel):
+    """Approval History - Audit trail for approvals"""
+    ACTION_CHOICES = [
+        ('submitted', _('Submitted')),
+        ('approved', _('Approved')),
+        ('rejected', _('Rejected')),
+        ('returned', _('Returned for Revision')),
+        ('cancelled', _('Cancelled')),
+    ]
+    
+    approval_request = models.ForeignKey(ApprovalRequest, on_delete=models.CASCADE, related_name='history', verbose_name=_("Approval Request"))
+    
+    level = models.PositiveSmallIntegerField(_("Level"))
+    action = models.CharField(_("Action"), max_length=20, choices=ACTION_CHOICES)
+    action_by = models.ForeignKey('auth.User', on_delete=models.PROTECT, related_name='approval_actions', verbose_name=_("Action By"))
+    action_date = models.DateTimeField(_("Action Date"), auto_now_add=True)
+    
+    comments = models.TextField(_("Comments"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Approval History")
+        verbose_name_plural = _("Approval Histories")
+        ordering = ['-action_date']
+    
+    def __str__(self):
+        return f"{self.approval_request.document_number} - Level {self.level} - {self.get_action_display()}"
+
+
+# ==================== NOTIFICATION / ALERT ====================
+
+class NotificationType(TimeStampedModel):
+    """Notification Type Configuration"""
+    TRIGGER_CHOICES = [
+        ('low_stock', _('Low Stock Alert')),
+        ('payment_due', _('Payment Due')),
+        ('payment_overdue', _('Payment Overdue')),
+        ('order_status', _('Order Status Change')),
+        ('approval_pending', _('Approval Pending')),
+        ('approval_completed', _('Approval Completed')),
+        ('document_created', _('Document Created')),
+        ('price_change', _('Price Change')),
+        ('expiry_alert', _('Expiry Alert')),
+        ('custom', _('Custom')),
+    ]
+    
+    CHANNEL_CHOICES = [
+        ('system', _('System Notification')),
+        ('email', _('Email')),
+        ('sms', _('SMS')),
+        ('both', _('Email & SMS')),
+    ]
+    
+    name = models.CharField(_("Notification Name"), max_length=100, unique=True)
+    code = models.CharField(_("Code"), max_length=30, unique=True)
+    trigger = models.CharField(_("Trigger"), max_length=30, choices=TRIGGER_CHOICES)
+    channel = models.CharField(_("Channel"), max_length=20, choices=CHANNEL_CHOICES, default='system')
+    
+    subject_template = models.CharField(_("Subject Template"), max_length=200, help_text=_("Use {variable} for dynamic content"))
+    message_template = models.TextField(_("Message Template"), help_text=_("Use {variable} for dynamic content"))
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Notification Type")
+        verbose_name_plural = _("Notification Types")
+        ordering = ['trigger', 'name']
+    
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
+class NotificationSetting(TimeStampedModel):
+    """User Notification Settings"""
+    user = models.ForeignKey('auth.User', on_delete=models.CASCADE, related_name='notification_settings', verbose_name=_("User"))
+    notification_type = models.ForeignKey(NotificationType, on_delete=models.CASCADE, related_name='user_settings', verbose_name=_("Notification Type"))
+    
+    is_enabled = models.BooleanField(_("Enabled"), default=True)
+    email_enabled = models.BooleanField(_("Email Enabled"), default=True)
+    sms_enabled = models.BooleanField(_("SMS Enabled"), default=False)
+    
+    class Meta:
+        verbose_name = _("Notification Setting")
+        verbose_name_plural = _("Notification Settings")
+        unique_together = ['user', 'notification_type']
+        ordering = ['user', 'notification_type']
+    
+    def __str__(self):
+        return f"{self.user.username} - {self.notification_type.name}"
+
+
+class Notification(TimeStampedModel):
+    """Notification - Individual notifications sent to users"""
+    PRIORITY_CHOICES = [
+        ('low', _('Low')),
+        ('normal', _('Normal')),
+        ('high', _('High')),
+        ('urgent', _('Urgent')),
+    ]
+    
+    STATUS_CHOICES = [
+        ('unread', _('Unread')),
+        ('read', _('Read')),
+        ('archived', _('Archived')),
+    ]
+    
+    user = models.ForeignKey('auth.User', on_delete=models.CASCADE, related_name='notifications', verbose_name=_("User"))
+    notification_type = models.ForeignKey(NotificationType, on_delete=models.SET_NULL, null=True, blank=True, related_name='notifications', verbose_name=_("Notification Type"))
+    
+    title = models.CharField(_("Title"), max_length=200)
+    message = models.TextField(_("Message"))
+    
+    priority = models.CharField(_("Priority"), max_length=10, choices=PRIORITY_CHOICES, default='normal')
+    status = models.CharField(_("Status"), max_length=10, choices=STATUS_CHOICES, default='unread')
+    
+    # Link to related document
+    link_url = models.CharField(_("Link URL"), max_length=500, blank=True)
+    document_type = models.CharField(_("Document Type"), max_length=50, blank=True)
+    document_id = models.PositiveIntegerField(_("Document ID"), null=True, blank=True)
+    
+    # Delivery status
+    email_sent = models.BooleanField(_("Email Sent"), default=False)
+    sms_sent = models.BooleanField(_("SMS Sent"), default=False)
+    
+    read_at = models.DateTimeField(_("Read At"), null=True, blank=True)
+    
+    class Meta:
+        verbose_name = _("Notification")
+        verbose_name_plural = _("Notifications")
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"{self.user.username} - {self.title}"
+    
+    def mark_as_read(self):
+        """Mark notification as read"""
+        if self.status == 'unread':
+            self.status = 'read'
+            self.read_at = timezone.now()
+            self.save(update_fields=['status', 'read_at'])
+
+
+class AlertRule(TimeStampedModel):
+    """Alert Rules - Automated alert triggers"""
+    CONDITION_TYPE_CHOICES = [
+        ('stock_below', _('Stock Below Threshold')),
+        ('days_before_due', _('Days Before Due Date')),
+        ('days_overdue', _('Days Overdue')),
+        ('amount_above', _('Amount Above Threshold')),
+        ('amount_below', _('Amount Below Threshold')),
+    ]
+    
+    name = models.CharField(_("Rule Name"), max_length=100)
+    notification_type = models.ForeignKey(NotificationType, on_delete=models.CASCADE, related_name='alert_rules', verbose_name=_("Notification Type"))
+    
+    condition_type = models.CharField(_("Condition Type"), max_length=30, choices=CONDITION_TYPE_CHOICES)
+    threshold_value = models.DecimalField(_("Threshold Value"), max_digits=15, decimal_places=2, default=Decimal('0.00'))
+    
+    # Optional filters
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, null=True, blank=True, related_name='alert_rules', verbose_name=_("Product"))
+    category = models.ForeignKey(Category, on_delete=models.CASCADE, null=True, blank=True, related_name='alert_rules', verbose_name=_("Category"))
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, null=True, blank=True, related_name='alert_rules', verbose_name=_("Customer"))
+    
+    # Recipients
+    notify_users = models.ManyToManyField('auth.User', blank=True, related_name='alert_rules', verbose_name=_("Notify Users"))
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    last_triggered = models.DateTimeField(_("Last Triggered"), null=True, blank=True)
+    
+    class Meta:
+        verbose_name = _("Alert Rule")
+        verbose_name_plural = _("Alert Rules")
+        ordering = ['name']
+    
+    def __str__(self):
+        return f"{self.name} ({self.get_condition_type_display()})"
+
+
+# ==================== PAYMENT METHOD (MASTER DATA) ====================
+
+class PaymentMethod(TimeStampedModel):
+    """Payment Method - Master data for payment options"""
+    PAYMENT_TYPE_CHOICES = [
+        ('cash', _('Cash')),
+        ('card', _('Card')),
+        ('mobile', _('Mobile Payment')),
+        ('bank', _('Bank Transfer')),
+        ('credit', _('Credit')),
+    ]
+    
+    name = models.CharField(_("Name"), max_length=100)
+    code = models.CharField(_("Code"), max_length=20, unique=True)
+    payment_type = models.CharField(_("Payment Type"), max_length=20, choices=PAYMENT_TYPE_CHOICES)
+    
+    # For mobile/bank payments
+    account_number = models.CharField(_("Account Number"), max_length=50, blank=True)
+    account_name = models.CharField(_("Account Name"), max_length=100, blank=True)
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Payment Method")
+        verbose_name_plural = _("Payment Methods")
+        ordering = ['name']
+    
+    def __str__(self):
+        return f"{self.name} ({self.get_payment_type_display()})"
+
+
+# ==================== USER PROFILE (FOR POS) ====================
+
+class UserPOSProfile(TimeStampedModel):
+    """User POS Profile - Links user to default shop/customer and warehouse"""
+    user = models.OneToOneField('auth.User', on_delete=models.CASCADE, related_name='pos_profile', verbose_name=_("User"))
+    
+    # Default settings for this user's POS operations
+    default_customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='pos_users', verbose_name=_("Default Customer"), help_text=_("Shop/Walk-in customer for this user"))
+    default_warehouse = models.ForeignKey(Warehouse, on_delete=models.SET_NULL, null=True, blank=True, related_name='pos_users', verbose_name=_("Default Warehouse"))
+    
+    # POS Settings
+    allow_discount = models.BooleanField(_("Allow Discount"), default=True)
+    max_discount_percent = models.DecimalField(_("Max Discount %"), max_digits=5, decimal_places=2, default=Decimal('10.00'))
+    
+    class Meta:
+        verbose_name = _("User POS Profile")
+        verbose_name_plural = _("User POS Profiles")
+    
+    def __str__(self):
+        return f"{self.user.username} - POS Profile"
+
+
+# ==================== QUICK SALE (SIMPLIFIED POS) ====================
+
+class QuickSale(TimeStampedModel):
+    """Quick Sale - Simplified POS for retail sales
+    
+    This is a simplified version of POS that doesn't require sessions.
+    Just scan products, enter quantity, and complete the sale.
+    """
+    STATUS_CHOICES = [
+        ('draft', _('Draft')),
+        ('completed', _('Completed')),
+        ('cancelled', _('Cancelled')),
+    ]
+    
+    PAYMENT_METHOD_CHOICES = [
+        ('cash', _('Cash')),
+        ('card', _('Card')),
+        ('mobile', _('Mobile')),
+        ('mixed', _('Mixed')),
+    ]
+    
+    # Auto-generated
+    sale_number = models.CharField(_("Sale #"), max_length=50, unique=True, editable=False)
+    sale_date = models.DateField(_("Sale Date"), default=timezone.now)
+    
+    # User who made the sale (auto-filled)
+    user = models.ForeignKey('auth.User', on_delete=models.PROTECT, related_name='quick_sales', verbose_name=_("Cashier"))
+    
+    # Customer info (optional - for walk-in just leave blank)
+    customer = models.ForeignKey(Customer, on_delete=models.PROTECT, null=True, blank=True, related_name='quick_sales', verbose_name=_("Customer"), help_text=_("Leave blank for walk-in"))
+    customer_name = models.CharField(_("Customer Name"), max_length=200, blank=True, help_text=_("Optional - for receipt"))
+    customer_phone = models.CharField(_("Phone"), max_length=20, blank=True)
+    
+    # Warehouse (auto-filled from user profile)
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name='quick_sales', verbose_name=_("Warehouse"))
+    
+    # Amounts (auto-calculated)
+    subtotal = models.DecimalField(_("Subtotal"), max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    discount_amount = models.DecimalField(_("Discount"), max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    total_amount = models.DecimalField(_("Total"), max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    
+    # Payment
+    payment_method = models.CharField(_("Payment Method"), max_length=20, choices=PAYMENT_METHOD_CHOICES, default='cash')
+    amount_received = models.DecimalField(_("Amount Received"), max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    change_amount = models.DecimalField(_("Change"), max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    
+    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='draft')
+    notes = models.TextField(_("Notes"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Quick Sale")
+        verbose_name_plural = _("Quick Sales")
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return self.sale_number
+    
+    def save(self, *args, **kwargs):
+        # Generate sale number
+        if not self.sale_number:
+            today = timezone.now().strftime('%Y%m%d')
+            last_sale = QuickSale.objects.filter(
+                sale_number__startswith=f"QS-{today}"
+            ).order_by('-id').first()
+            
+            if last_sale:
+                last_num = int(last_sale.sale_number.split('-')[-1])
+                self.sale_number = f"QS-{today}-{last_num + 1:04d}"
+            else:
+                self.sale_number = f"QS-{today}-0001"
+        
+        # Auto-fill warehouse from user profile if not set
+        if not self.warehouse_id and self.user_id:
+            try:
+                profile = self.user.pos_profile
+                if profile.default_warehouse:
+                    self.warehouse = profile.default_warehouse
+            except UserPOSProfile.DoesNotExist:
+                pass
+        
+        # Auto-fill customer from user profile if not set
+        if not self.customer_id and self.user_id:
+            try:
+                profile = self.user.pos_profile
+                if profile.default_customer:
+                    self.customer = profile.default_customer
+            except UserPOSProfile.DoesNotExist:
+                pass
+        
+        super().save(*args, **kwargs)
+    
+    def calculate_totals(self):
+        """Calculate totals from items"""
+        items = self.items.all()
+        self.subtotal = sum(item.line_total for item in items)
+        self.total_amount = self.subtotal - self.discount_amount
+        self.save(update_fields=['subtotal', 'total_amount'])
+
+
+class QuickSaleItem(TimeStampedModel):
+    """Quick Sale Item - Line items for quick sale"""
+    quick_sale = models.ForeignKey(QuickSale, on_delete=models.CASCADE, related_name='items', verbose_name=_("Quick Sale"))
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, verbose_name=_("Product"))
+    
+    quantity = models.DecimalField(_("Qty"), max_digits=10, decimal_places=2, default=Decimal('1.00'), validators=[MinValueValidator(Decimal('0.01'))])
+    unit_price = models.DecimalField(_("Price"), max_digits=10, decimal_places=2)
+    line_total = models.DecimalField(_("Total"), max_digits=12, decimal_places=2, default=Decimal('0.00'))
+    
+    class Meta:
+        verbose_name = _("Quick Sale Item")
+        verbose_name_plural = _("Quick Sale Items")
+    
+    def __str__(self):
+        return f"{self.product.name} x {self.quantity}"
+    
+    def save(self, *args, **kwargs):
+        # Auto-set price from product
+        if not self.unit_price:
+            self.unit_price = self.product.selling_price
+        
+        self.line_total = self.quantity * self.unit_price
+        super().save(*args, **kwargs)
+        
+        # Update sale totals
+        self.quick_sale.calculate_totals()
