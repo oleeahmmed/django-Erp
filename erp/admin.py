@@ -29,7 +29,16 @@ from .models import (
     BankAccount, IncomingPayment, IncomingPaymentInvoice,
     OutgoingPayment, OutgoingPaymentInvoice,
     AccountType, ChartOfAccounts, CostCenter, Project,
-    JournalEntry, JournalEntryLine, FiscalYear, Budget
+    JournalEntry, JournalEntryLine, FiscalYear, Budget,
+    # New MUST HAVE models
+    Currency, ExchangeRate, TaxType, TaxRate,
+    PaymentTerm, UnitOfMeasure, UOMConversion,
+    PriceList, PriceListItem,
+    # Discount, Stock Adjustment, Approval, Notification models
+    DiscountType, DiscountRule,
+    StockAdjustment, StockAdjustmentItem,
+    ApprovalWorkflow, ApprovalLevel, ApprovalRequest, ApprovalHistory,
+    NotificationType, NotificationSetting, Notification, AlertRule
 )
 from .utils import (
     copy_sales_quotation_to_order,
@@ -2020,3 +2029,858 @@ class BudgetAdmin(ModelAdmin):
         elif utilization > 80:
             return format_html('<span style="color: orange;">{:.2f}%</span>', utilization)
         return format_html('<span style="color: green;">{:.2f}%</span>', utilization)
+
+
+# ==================== CURRENCY & EXCHANGE RATE ADMIN ====================
+
+@admin.register(Currency)
+class CurrencyAdmin(ModelAdmin):
+    list_display = ['code', 'name', 'symbol', 'decimal_places', 'is_base_currency', 'is_active']
+    list_filter = ['is_base_currency', 'is_active']
+    search_fields = ['code', 'name']
+    list_editable = ['is_active']
+    
+    fieldsets = (
+        (_('Basic Information'), {
+            'fields': (
+                ('code', 'name'),
+                ('symbol', 'decimal_places'),
+            ),
+            'classes': ['tab'],
+            'description': _('Currency identification'),
+        }),
+        (_('Settings'), {
+            'fields': (
+                ('is_base_currency', 'is_active'),
+            ),
+            'classes': ['tab'],
+            'description': _('Currency settings'),
+        }),
+    )
+
+
+@admin.register(ExchangeRate)
+class ExchangeRateAdmin(ModelAdmin):
+    list_display = ['from_currency', 'to_currency', 'rate', 'effective_date', 'is_active']
+    list_filter = ['from_currency', 'to_currency', 'is_active', 'effective_date']
+    search_fields = ['from_currency__code', 'to_currency__code']
+    list_editable = ['is_active']
+    autocomplete_fields = ['from_currency', 'to_currency']
+    date_hierarchy = 'effective_date'
+    
+    fieldsets = (
+        (_('Currency Pair'), {
+            'fields': (
+                ('from_currency', 'to_currency'),
+            ),
+            'classes': ['tab'],
+            'description': _('Select currencies for exchange'),
+        }),
+        (_('Rate Details'), {
+            'fields': (
+                ('rate', 'effective_date'),
+                ('is_active',),
+            ),
+            'classes': ['tab'],
+            'description': _('Exchange rate and validity'),
+        }),
+    )
+
+
+# ==================== TAX CONFIGURATION ADMIN ====================
+
+class TaxRateInline(TabularInline):
+    model = TaxRate
+    extra = 1
+    fields = ['name', 'rate', 'is_default', 'is_active', 'effective_from', 'effective_to']
+
+
+@admin.register(TaxType)
+class TaxTypeAdmin(ModelAdmin):
+    list_display = ['code', 'name', 'category', 'is_active']
+    list_filter = ['category', 'is_active']
+    search_fields = ['code', 'name']
+    list_editable = ['is_active']
+    autocomplete_fields = ['sales_account', 'purchase_account']
+    inlines = [TaxRateInline]
+    
+    fieldsets = (
+        (_('Basic Information'), {
+            'fields': (
+                ('code', 'name'),
+                ('category',),
+                ('description',),
+            ),
+            'classes': ['tab'],
+            'description': _('Tax type identification'),
+        }),
+        (_('Accounting Integration'), {
+            'fields': (
+                ('sales_account', 'purchase_account'),
+            ),
+            'classes': ['tab'],
+            'description': _('GL accounts for tax posting'),
+        }),
+        (_('Status'), {
+            'fields': (
+                ('is_active',),
+            ),
+            'classes': ['tab'],
+            'description': _('Tax type status'),
+        }),
+    )
+
+
+@admin.register(TaxRate)
+class TaxRateAdmin(ModelAdmin):
+    list_display = ['tax_type', 'name', 'rate', 'is_default', 'is_active', 'effective_from', 'effective_to']
+    list_filter = ['tax_type', 'is_default', 'is_active']
+    search_fields = ['name', 'tax_type__name', 'tax_type__code']
+    list_editable = ['is_active']
+    autocomplete_fields = ['tax_type']
+    
+    fieldsets = (
+        (_('Basic Information'), {
+            'fields': (
+                ('tax_type', 'name'),
+                ('rate',),
+            ),
+            'classes': ['tab'],
+            'description': _('Tax rate identification'),
+        }),
+        (_('Validity'), {
+            'fields': (
+                ('effective_from', 'effective_to'),
+            ),
+            'classes': ['tab'],
+            'description': _('Rate validity period'),
+        }),
+        (_('Settings'), {
+            'fields': (
+                ('is_default', 'is_active'),
+            ),
+            'classes': ['tab'],
+            'description': _('Rate settings'),
+        }),
+    )
+
+
+# ==================== PAYMENT TERMS ADMIN ====================
+
+@admin.register(PaymentTerm)
+class PaymentTermAdmin(ModelAdmin):
+    list_display = ['code', 'name', 'days', 'discount_days', 'discount_percentage', 'is_default', 'is_active']
+    list_filter = ['is_default', 'is_active']
+    search_fields = ['code', 'name']
+    list_editable = ['is_active']
+    
+    fieldsets = (
+        (_('Basic Information'), {
+            'fields': (
+                ('code', 'name'),
+                ('days',),
+                ('description',),
+            ),
+            'classes': ['tab'],
+            'description': _('Payment term identification'),
+        }),
+        (_('Early Payment Discount'), {
+            'fields': (
+                ('discount_days', 'discount_percentage'),
+            ),
+            'classes': ['tab'],
+            'description': _('Discount for early payment'),
+        }),
+        (_('Settings'), {
+            'fields': (
+                ('is_default', 'is_active'),
+            ),
+            'classes': ['tab'],
+            'description': _('Payment term settings'),
+        }),
+    )
+
+
+# ==================== UNIT OF MEASURE ADMIN ====================
+
+class UOMConversionInline(TabularInline):
+    model = UOMConversion
+    fk_name = 'from_uom'
+    extra = 1
+    fields = ['to_uom', 'conversion_factor', 'is_active']
+    autocomplete_fields = ['to_uom']
+
+
+@admin.register(UnitOfMeasure)
+class UnitOfMeasureAdmin(ModelAdmin):
+    list_display = ['code', 'name', 'uom_type', 'is_base_unit', 'is_active']
+    list_filter = ['uom_type', 'is_base_unit', 'is_active']
+    search_fields = ['code', 'name']
+    list_editable = ['is_active']
+    inlines = [UOMConversionInline]
+    
+    fieldsets = (
+        (_('Basic Information'), {
+            'fields': (
+                ('code', 'name'),
+                ('uom_type',),
+            ),
+            'classes': ['tab'],
+            'description': _('Unit of measure identification'),
+        }),
+        (_('Settings'), {
+            'fields': (
+                ('is_base_unit', 'is_active'),
+            ),
+            'classes': ['tab'],
+            'description': _('UOM settings'),
+        }),
+    )
+
+
+@admin.register(UOMConversion)
+class UOMConversionAdmin(ModelAdmin):
+    list_display = ['from_uom', 'to_uom', 'conversion_factor', 'is_active']
+    list_filter = ['from_uom__uom_type', 'is_active']
+    search_fields = ['from_uom__code', 'from_uom__name', 'to_uom__code', 'to_uom__name']
+    list_editable = ['is_active']
+    autocomplete_fields = ['from_uom', 'to_uom']
+    
+    fieldsets = (
+        (_('Conversion'), {
+            'fields': (
+                ('from_uom', 'to_uom'),
+                ('conversion_factor',),
+            ),
+            'classes': ['tab'],
+            'description': _('UOM conversion rule'),
+        }),
+        (_('Status'), {
+            'fields': (
+                ('is_active',),
+            ),
+            'classes': ['tab'],
+            'description': _('Conversion status'),
+        }),
+    )
+
+
+# ==================== PRICE LIST ADMIN ====================
+
+class PriceListItemInline(TabularInline):
+    model = PriceListItem
+    extra = 1
+    fields = ['product', 'unit_price', 'min_quantity', 'discount_percentage', 'is_active']
+    autocomplete_fields = ['product']
+
+
+@admin.register(PriceList)
+class PriceListAdmin(ModelAdmin):
+    list_display = ['code', 'name', 'price_type', 'currency', 'is_default', 'is_active', 'valid_from', 'valid_to']
+    list_filter = ['price_type', 'is_default', 'is_active', 'currency']
+    search_fields = ['code', 'name']
+    list_editable = ['is_active']
+    autocomplete_fields = ['currency']
+    inlines = [PriceListItemInline]
+    
+    fieldsets = (
+        (_('Basic Information'), {
+            'fields': (
+                ('code', 'name'),
+                ('price_type', 'currency'),
+                ('description',),
+            ),
+            'classes': ['tab'],
+            'description': _('Price list identification'),
+        }),
+        (_('Validity'), {
+            'fields': (
+                ('valid_from', 'valid_to'),
+            ),
+            'classes': ['tab'],
+            'description': _('Price list validity period'),
+        }),
+        (_('Settings'), {
+            'fields': (
+                ('is_default', 'is_active'),
+            ),
+            'classes': ['tab'],
+            'description': _('Price list settings'),
+        }),
+    )
+
+
+@admin.register(PriceListItem)
+class PriceListItemAdmin(ModelAdmin):
+    list_display = ['price_list', 'product', 'unit_price', 'min_quantity', 'discount_percentage', 'net_price_display', 'is_active']
+    list_filter = ['price_list', 'is_active']
+    search_fields = ['product__name', 'product__sku', 'price_list__name']
+    list_editable = ['is_active']
+    autocomplete_fields = ['price_list', 'product']
+    
+    fieldsets = (
+        (_('Price List & Product'), {
+            'fields': (
+                ('price_list', 'product'),
+            ),
+            'classes': ['tab'],
+            'description': _('Select price list and product'),
+        }),
+        (_('Pricing'), {
+            'fields': (
+                ('unit_price', 'min_quantity'),
+                ('discount_percentage',),
+            ),
+            'classes': ['tab'],
+            'description': _('Price and discount settings'),
+        }),
+        (_('Status'), {
+            'fields': (
+                ('is_active',),
+            ),
+            'classes': ['tab'],
+            'description': _('Item status'),
+        }),
+    )
+    
+    @display(description=_('Net Price'))
+    def net_price_display(self, obj):
+        return obj.net_price
+
+
+# ==================== DISCOUNT MANAGEMENT ADMIN ====================
+
+class DiscountRuleInline(TabularInline):
+    model = DiscountRule
+    extra = 1
+    fields = ['product', 'category', 'customer', 'min_quantity', 'is_active']
+    autocomplete_fields = ['product', 'category', 'customer']
+
+
+@admin.register(DiscountType)
+class DiscountTypeAdmin(ModelAdmin):
+    list_display = ['code', 'name', 'discount_method', 'value', 'apply_on', 'valid_from', 'valid_to', 'usage_count', 'is_valid_display', 'is_active']
+    list_filter = ['discount_method', 'apply_on', 'is_active']
+    search_fields = ['code', 'name']
+    list_editable = ['is_active']
+    inlines = [DiscountRuleInline]
+    
+    fieldsets = (
+        (_('Basic Information'), {
+            'fields': (
+                ('code', 'name'),
+                ('discount_method', 'apply_on'),
+                ('description',),
+            ),
+            'classes': ['tab'],
+            'description': _('Discount identification'),
+        }),
+        (_('Discount Value'), {
+            'fields': (
+                ('value', 'max_discount_amount'),
+                ('min_order_amount',),
+            ),
+            'classes': ['tab'],
+            'description': _('Discount amount settings'),
+        }),
+        (_('Validity'), {
+            'fields': (
+                ('valid_from', 'valid_to'),
+            ),
+            'classes': ['tab'],
+            'description': _('Discount validity period'),
+        }),
+        (_('Usage Limits'), {
+            'fields': (
+                ('usage_limit', 'per_customer_limit'),
+            ),
+            'classes': ['tab'],
+            'description': _('Usage restrictions'),
+        }),
+        (_('Status'), {
+            'fields': (
+                ('is_active',),
+            ),
+            'classes': ['tab'],
+            'description': _('Discount status'),
+        }),
+    )
+    
+    @display(description=_('Valid'))
+    def is_valid_display(self, obj):
+        if obj.is_valid():
+            return format_html('<span style="color: green;">✓ Valid</span>')
+        return format_html('<span style="color: red;">✗ Invalid</span>')
+
+
+@admin.register(DiscountRule)
+class DiscountRuleAdmin(ModelAdmin):
+    list_display = ['discount_type', 'product', 'category', 'customer', 'min_quantity', 'is_active']
+    list_filter = ['discount_type', 'is_active']
+    search_fields = ['discount_type__code', 'discount_type__name', 'product__name', 'customer__name']
+    list_editable = ['is_active']
+    autocomplete_fields = ['discount_type', 'product', 'category', 'customer']
+    
+    fieldsets = (
+        (_('Discount Type'), {
+            'fields': (
+                ('discount_type',),
+            ),
+            'classes': ['tab'],
+            'description': _('Select discount type'),
+        }),
+        (_('Conditions'), {
+            'fields': (
+                ('product', 'category'),
+                ('customer',),
+                ('min_quantity',),
+            ),
+            'classes': ['tab'],
+            'description': _('Rule conditions'),
+        }),
+        (_('Status'), {
+            'fields': (
+                ('is_active',),
+            ),
+            'classes': ['tab'],
+            'description': _('Rule status'),
+        }),
+    )
+
+
+# ==================== STOCK ADJUSTMENT ADMIN ====================
+
+class StockAdjustmentItemInline(TabularInline):
+    model = StockAdjustmentItem
+    extra = 1
+    fields = ['product', 'system_quantity', 'actual_quantity', 'quantity_difference', 'unit_cost', 'value_difference', 'reason']
+    readonly_fields = ['system_quantity', 'quantity_difference', 'value_difference']
+    autocomplete_fields = ['product']
+
+
+@admin.register(StockAdjustment)
+class StockAdjustmentAdmin(ModelAdmin):
+    list_display = ['adjustment_number', 'adjustment_date', 'adjustment_type', 'warehouse', 'status', 'total_increase', 'total_decrease', 'total_value', 'requested_by']
+    list_filter = ['adjustment_type', 'status', 'warehouse', 'adjustment_date']
+    search_fields = ['adjustment_number', 'requested_by', 'approved_by']
+    readonly_fields = ['adjustment_number', 'total_increase', 'total_decrease', 'total_value']
+    autocomplete_fields = ['warehouse']
+    inlines = [StockAdjustmentItemInline]
+    date_hierarchy = 'adjustment_date'
+    
+    fieldsets = (
+        (_('Basic Information'), {
+            'fields': (
+                ('adjustment_number', 'adjustment_date'),
+                ('adjustment_type', 'warehouse'),
+                ('reason',),
+            ),
+            'classes': ['tab'],
+            'description': _('Adjustment identification'),
+        }),
+        (_('Status & Approval'), {
+            'fields': (
+                ('status',),
+                ('requested_by', 'approved_by'),
+                ('approved_date',),
+            ),
+            'classes': ['tab'],
+            'description': _('Approval information'),
+        }),
+        (_('Totals'), {
+            'fields': (
+                ('total_increase', 'total_decrease'),
+                ('total_value',),
+            ),
+            'classes': ['tab'],
+            'description': _('Calculated totals'),
+        }),
+        (_('Notes'), {
+            'fields': (
+                ('notes',),
+            ),
+            'classes': ['tab'],
+            'description': _('Additional notes'),
+        }),
+    )
+    
+    actions = ['approve_adjustments', 'post_adjustments']
+    
+    @admin.action(description=_('Approve selected adjustments'))
+    def approve_adjustments(self, request, queryset):
+        updated = queryset.filter(status='pending').update(
+            status='approved',
+            approved_by=request.user.get_full_name() or request.user.username,
+            approved_date=timezone.now()
+        )
+        self.message_user(request, f'{updated} adjustment(s) approved.')
+    
+    @admin.action(description=_('Post selected adjustments'))
+    def post_adjustments(self, request, queryset):
+        updated = queryset.filter(status='approved').update(status='posted')
+        self.message_user(request, f'{updated} adjustment(s) posted.')
+
+
+@admin.register(StockAdjustmentItem)
+class StockAdjustmentItemAdmin(ModelAdmin):
+    list_display = ['stock_adjustment', 'product', 'system_quantity', 'actual_quantity', 'quantity_difference', 'value_difference']
+    list_filter = ['stock_adjustment__adjustment_type', 'stock_adjustment__status']
+    search_fields = ['stock_adjustment__adjustment_number', 'product__name', 'product__sku']
+    autocomplete_fields = ['stock_adjustment', 'product']
+    
+    def has_module_permission(self, request):
+        return False
+
+
+# ==================== APPROVAL WORKFLOW ADMIN ====================
+
+class ApprovalLevelInline(TabularInline):
+    model = ApprovalLevel
+    extra = 1
+    fields = ['level', 'name', 'min_amount', 'max_amount', 'approver_user', 'approver_role', 'is_active']
+    autocomplete_fields = ['approver_user']
+
+
+@admin.register(ApprovalWorkflow)
+class ApprovalWorkflowAdmin(ModelAdmin):
+    list_display = ['name', 'document_type', 'is_active', 'levels_count']
+    list_filter = ['document_type', 'is_active']
+    search_fields = ['name']
+    list_editable = ['is_active']
+    inlines = [ApprovalLevelInline]
+    
+    fieldsets = (
+        (_('Basic Information'), {
+            'fields': (
+                ('name', 'document_type'),
+                ('description',),
+            ),
+            'classes': ['tab'],
+            'description': _('Workflow identification'),
+        }),
+        (_('Status'), {
+            'fields': (
+                ('is_active',),
+            ),
+            'classes': ['tab'],
+            'description': _('Workflow status'),
+        }),
+    )
+    
+    @display(description=_('Levels'))
+    def levels_count(self, obj):
+        return obj.levels.count()
+
+
+@admin.register(ApprovalLevel)
+class ApprovalLevelAdmin(ModelAdmin):
+    list_display = ['workflow', 'level', 'name', 'min_amount', 'max_amount', 'approver_user', 'approver_role', 'is_active']
+    list_filter = ['workflow', 'is_active']
+    search_fields = ['name', 'workflow__name', 'approver_role']
+    list_editable = ['is_active']
+    autocomplete_fields = ['workflow', 'approver_user']
+    
+    fieldsets = (
+        (_('Workflow & Level'), {
+            'fields': (
+                ('workflow', 'level'),
+                ('name',),
+            ),
+            'classes': ['tab'],
+            'description': _('Level identification'),
+        }),
+        (_('Amount Conditions'), {
+            'fields': (
+                ('min_amount', 'max_amount'),
+            ),
+            'classes': ['tab'],
+            'description': _('Amount thresholds'),
+        }),
+        (_('Approvers'), {
+            'fields': (
+                ('approver_user', 'approver_role'),
+            ),
+            'classes': ['tab'],
+            'description': _('Who can approve'),
+        }),
+        (_('Status'), {
+            'fields': (
+                ('is_active',),
+            ),
+            'classes': ['tab'],
+            'description': _('Level status'),
+        }),
+    )
+
+
+class ApprovalHistoryInline(TabularInline):
+    model = ApprovalHistory
+    extra = 0
+    fields = ['level', 'action', 'action_by', 'action_date', 'comments']
+    readonly_fields = ['level', 'action', 'action_by', 'action_date', 'comments']
+    can_delete = False
+    
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ApprovalRequest)
+class ApprovalRequestAdmin(ModelAdmin):
+    list_display = ['document_number', 'document_type', 'document_amount', 'current_level', 'status', 'requested_by', 'requested_date']
+    list_filter = ['document_type', 'status', 'requested_date']
+    search_fields = ['document_number', 'requested_by__username']
+    readonly_fields = ['document_number', 'document_type', 'document_id', 'document_amount', 'requested_by', 'requested_date']
+    autocomplete_fields = ['workflow']
+    inlines = [ApprovalHistoryInline]
+    date_hierarchy = 'requested_date'
+    
+    fieldsets = (
+        (_('Document Information'), {
+            'fields': (
+                ('document_type', 'document_number'),
+                ('document_id', 'document_amount'),
+            ),
+            'classes': ['tab'],
+            'description': _('Document details'),
+        }),
+        (_('Approval Status'), {
+            'fields': (
+                ('workflow', 'current_level'),
+                ('status',),
+            ),
+            'classes': ['tab'],
+            'description': _('Current approval status'),
+        }),
+        (_('Request Information'), {
+            'fields': (
+                ('requested_by', 'requested_date'),
+                ('notes',),
+            ),
+            'classes': ['tab'],
+            'description': _('Request details'),
+        }),
+    )
+    
+    actions = ['approve_requests', 'reject_requests']
+    
+    @admin.action(description=_('Approve selected requests'))
+    def approve_requests(self, request, queryset):
+        for approval_request in queryset.filter(status='pending'):
+            ApprovalHistory.objects.create(
+                approval_request=approval_request,
+                level=approval_request.current_level,
+                action='approved',
+                action_by=request.user,
+                comments='Bulk approved from admin'
+            )
+            approval_request.status = 'approved'
+            approval_request.save()
+        self.message_user(request, f'{queryset.count()} request(s) approved.')
+    
+    @admin.action(description=_('Reject selected requests'))
+    def reject_requests(self, request, queryset):
+        for approval_request in queryset.filter(status='pending'):
+            ApprovalHistory.objects.create(
+                approval_request=approval_request,
+                level=approval_request.current_level,
+                action='rejected',
+                action_by=request.user,
+                comments='Bulk rejected from admin'
+            )
+            approval_request.status = 'rejected'
+            approval_request.save()
+        self.message_user(request, f'{queryset.count()} request(s) rejected.')
+
+
+@admin.register(ApprovalHistory)
+class ApprovalHistoryAdmin(ModelAdmin):
+    list_display = ['approval_request', 'level', 'action', 'action_by', 'action_date']
+    list_filter = ['action', 'action_date']
+    search_fields = ['approval_request__document_number', 'action_by__username']
+    readonly_fields = ['approval_request', 'level', 'action', 'action_by', 'action_date', 'comments']
+    date_hierarchy = 'action_date'
+    
+    def has_add_permission(self, request):
+        return False
+    
+    def has_change_permission(self, request, obj=None):
+        return False
+    
+    def has_module_permission(self, request):
+        return False
+
+
+# ==================== NOTIFICATION / ALERT ADMIN ====================
+
+@admin.register(NotificationType)
+class NotificationTypeAdmin(ModelAdmin):
+    list_display = ['code', 'name', 'trigger', 'channel', 'is_active']
+    list_filter = ['trigger', 'channel', 'is_active']
+    search_fields = ['code', 'name']
+    list_editable = ['is_active']
+    
+    fieldsets = (
+        (_('Basic Information'), {
+            'fields': (
+                ('code', 'name'),
+                ('trigger', 'channel'),
+            ),
+            'classes': ['tab'],
+            'description': _('Notification type identification'),
+        }),
+        (_('Templates'), {
+            'fields': (
+                ('subject_template',),
+                ('message_template',),
+            ),
+            'classes': ['tab'],
+            'description': _('Message templates'),
+        }),
+        (_('Status'), {
+            'fields': (
+                ('is_active',),
+            ),
+            'classes': ['tab'],
+            'description': _('Notification type status'),
+        }),
+    )
+
+
+@admin.register(NotificationSetting)
+class NotificationSettingAdmin(ModelAdmin):
+    list_display = ['user', 'notification_type', 'is_enabled', 'email_enabled', 'sms_enabled']
+    list_filter = ['notification_type', 'is_enabled', 'email_enabled', 'sms_enabled']
+    search_fields = ['user__username', 'notification_type__name']
+    list_editable = ['is_enabled', 'email_enabled', 'sms_enabled']
+    autocomplete_fields = ['user', 'notification_type']
+    
+    fieldsets = (
+        (_('User & Notification'), {
+            'fields': (
+                ('user', 'notification_type'),
+            ),
+            'classes': ['tab'],
+            'description': _('User and notification type'),
+        }),
+        (_('Settings'), {
+            'fields': (
+                ('is_enabled',),
+                ('email_enabled', 'sms_enabled'),
+            ),
+            'classes': ['tab'],
+            'description': _('Notification preferences'),
+        }),
+    )
+
+
+@admin.register(Notification)
+class NotificationAdmin(ModelAdmin):
+    list_display = ['title', 'user', 'notification_type', 'priority', 'status', 'email_sent', 'sms_sent', 'created_at']
+    list_filter = ['priority', 'status', 'notification_type', 'email_sent', 'sms_sent', 'created_at']
+    search_fields = ['title', 'message', 'user__username']
+    readonly_fields = ['read_at']
+    autocomplete_fields = ['user', 'notification_type']
+    date_hierarchy = 'created_at'
+    
+    fieldsets = (
+        (_('Recipient'), {
+            'fields': (
+                ('user', 'notification_type'),
+            ),
+            'classes': ['tab'],
+            'description': _('Notification recipient'),
+        }),
+        (_('Content'), {
+            'fields': (
+                ('title',),
+                ('message',),
+                ('priority',),
+            ),
+            'classes': ['tab'],
+            'description': _('Notification content'),
+        }),
+        (_('Link'), {
+            'fields': (
+                ('link_url',),
+                ('document_type', 'document_id'),
+            ),
+            'classes': ['tab'],
+            'description': _('Related document link'),
+        }),
+        (_('Status'), {
+            'fields': (
+                ('status', 'read_at'),
+                ('email_sent', 'sms_sent'),
+            ),
+            'classes': ['tab'],
+            'description': _('Delivery status'),
+        }),
+    )
+    
+    actions = ['mark_as_read', 'mark_as_unread', 'send_email']
+    
+    @admin.action(description=_('Mark as read'))
+    def mark_as_read(self, request, queryset):
+        from django.utils import timezone
+        queryset.update(status='read', read_at=timezone.now())
+        self.message_user(request, f'{queryset.count()} notification(s) marked as read.')
+    
+    @admin.action(description=_('Mark as unread'))
+    def mark_as_unread(self, request, queryset):
+        queryset.update(status='unread', read_at=None)
+        self.message_user(request, f'{queryset.count()} notification(s) marked as unread.')
+    
+    @admin.action(description=_('Send email notification'))
+    def send_email(self, request, queryset):
+        # Placeholder for email sending logic
+        queryset.update(email_sent=True)
+        self.message_user(request, f'{queryset.count()} email(s) sent.')
+
+
+@admin.register(AlertRule)
+class AlertRuleAdmin(ModelAdmin):
+    list_display = ['name', 'notification_type', 'condition_type', 'threshold_value', 'is_active', 'last_triggered']
+    list_filter = ['condition_type', 'is_active', 'notification_type']
+    search_fields = ['name', 'notification_type__name']
+    list_editable = ['is_active']
+    autocomplete_fields = ['notification_type', 'product', 'category', 'customer']
+    filter_horizontal = ['notify_users']
+    
+    fieldsets = (
+        (_('Basic Information'), {
+            'fields': (
+                ('name', 'notification_type'),
+            ),
+            'classes': ['tab'],
+            'description': _('Alert rule identification'),
+        }),
+        (_('Condition'), {
+            'fields': (
+                ('condition_type', 'threshold_value'),
+            ),
+            'classes': ['tab'],
+            'description': _('Alert trigger condition'),
+        }),
+        (_('Filters'), {
+            'fields': (
+                ('product', 'category'),
+                ('customer',),
+            ),
+            'classes': ['tab'],
+            'description': _('Optional filters'),
+        }),
+        (_('Recipients'), {
+            'fields': (
+                ('notify_users',),
+            ),
+            'classes': ['tab'],
+            'description': _('Users to notify'),
+        }),
+        (_('Status'), {
+            'fields': (
+                ('is_active', 'last_triggered'),
+            ),
+            'classes': ['tab'],
+            'description': _('Rule status'),
+        }),
+    )

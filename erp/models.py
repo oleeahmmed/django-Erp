@@ -2335,3 +2335,731 @@ class Budget(TimeStampedModel):
         if self.budget_amount > 0:
             return (self.actual_amount / self.budget_amount) * 100
         return Decimal('0.00')
+
+
+# ==================== CURRENCY & EXCHANGE RATE ====================
+
+class Currency(TimeStampedModel):
+    """Currency Master"""
+    code = models.CharField(_("Currency Code"), max_length=3, unique=True, help_text=_("ISO 4217 code (e.g., USD, BDT, EUR)"))
+    name = models.CharField(_("Currency Name"), max_length=100)
+    symbol = models.CharField(_("Symbol"), max_length=10, help_text=_("e.g., $, ৳, €"))
+    decimal_places = models.PositiveSmallIntegerField(_("Decimal Places"), default=2)
+    is_base_currency = models.BooleanField(_("Base Currency"), default=False, help_text=_("Only one currency can be base"))
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Currency")
+        verbose_name_plural = _("Currencies")
+        ordering = ['-is_base_currency', 'code']
+    
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+    
+    def save(self, *args, **kwargs):
+        # Ensure only one base currency
+        if self.is_base_currency:
+            Currency.objects.filter(is_base_currency=True).exclude(pk=self.pk).update(is_base_currency=False)
+        super().save(*args, **kwargs)
+
+
+class ExchangeRate(TimeStampedModel):
+    """Exchange Rate for Currency Conversion"""
+    from_currency = models.ForeignKey(Currency, on_delete=models.PROTECT, related_name='rates_from', verbose_name=_("From Currency"))
+    to_currency = models.ForeignKey(Currency, on_delete=models.PROTECT, related_name='rates_to', verbose_name=_("To Currency"))
+    rate = models.DecimalField(_("Exchange Rate"), max_digits=18, decimal_places=6, validators=[MinValueValidator(Decimal('0.000001'))])
+    effective_date = models.DateField(_("Effective Date"), default=timezone.now)
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Exchange Rate")
+        verbose_name_plural = _("Exchange Rates")
+        ordering = ['-effective_date', 'from_currency']
+        unique_together = ['from_currency', 'to_currency', 'effective_date']
+    
+    def __str__(self):
+        return f"1 {self.from_currency.code} = {self.rate} {self.to_currency.code} ({self.effective_date})"
+    
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.from_currency == self.to_currency:
+            raise ValidationError(_("From and To currency cannot be the same."))
+
+
+# ==================== TAX CONFIGURATION ====================
+
+class TaxType(TimeStampedModel):
+    """Tax Type Master (VAT, GST, etc.)"""
+    TAX_CATEGORY_CHOICES = [
+        ('sales', _('Sales Tax')),
+        ('purchase', _('Purchase Tax')),
+        ('both', _('Both Sales & Purchase')),
+    ]
+    
+    name = models.CharField(_("Tax Name"), max_length=100, unique=True)
+    code = models.CharField(_("Tax Code"), max_length=20, unique=True)
+    category = models.CharField(_("Category"), max_length=20, choices=TAX_CATEGORY_CHOICES, default='both')
+    description = models.TextField(_("Description"), blank=True)
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    # Accounting Integration
+    sales_account = models.ForeignKey(ChartOfAccounts, on_delete=models.SET_NULL, null=True, blank=True, related_name='sales_tax_types', verbose_name=_("Sales Tax Account"))
+    purchase_account = models.ForeignKey(ChartOfAccounts, on_delete=models.SET_NULL, null=True, blank=True, related_name='purchase_tax_types', verbose_name=_("Purchase Tax Account"))
+    
+    class Meta:
+        verbose_name = _("Tax Type")
+        verbose_name_plural = _("Tax Types")
+        ordering = ['name']
+    
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
+class TaxRate(TimeStampedModel):
+    """Tax Rate Configuration"""
+    tax_type = models.ForeignKey(TaxType, on_delete=models.PROTECT, related_name='rates', verbose_name=_("Tax Type"))
+    name = models.CharField(_("Rate Name"), max_length=100, help_text=_("e.g., Standard Rate, Reduced Rate"))
+    rate = models.DecimalField(_("Rate (%)"), max_digits=5, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
+    is_default = models.BooleanField(_("Default Rate"), default=False)
+    is_active = models.BooleanField(_("Active"), default=True)
+    effective_from = models.DateField(_("Effective From"), default=timezone.now)
+    effective_to = models.DateField(_("Effective To"), null=True, blank=True)
+    
+    class Meta:
+        verbose_name = _("Tax Rate")
+        verbose_name_plural = _("Tax Rates")
+        ordering = ['tax_type', '-is_default', 'rate']
+    
+    def __str__(self):
+        return f"{self.tax_type.code} - {self.name} ({self.rate}%)"
+    
+    def save(self, *args, **kwargs):
+        # Ensure only one default rate per tax type
+        if self.is_default:
+            TaxRate.objects.filter(tax_type=self.tax_type, is_default=True).exclude(pk=self.pk).update(is_default=False)
+        super().save(*args, **kwargs)
+
+
+# ==================== PAYMENT TERMS ====================
+
+class PaymentTerm(TimeStampedModel):
+    """Payment Terms Master"""
+    name = models.CharField(_("Term Name"), max_length=100, unique=True)
+    code = models.CharField(_("Term Code"), max_length=20, unique=True)
+    days = models.PositiveIntegerField(_("Days"), default=0, help_text=_("Number of days for payment"))
+    description = models.TextField(_("Description"), blank=True)
+    is_default = models.BooleanField(_("Default"), default=False)
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    # Discount for early payment
+    discount_days = models.PositiveIntegerField(_("Discount Days"), default=0, help_text=_("Days within which discount applies"))
+    discount_percentage = models.DecimalField(_("Discount (%)"), max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    
+    class Meta:
+        verbose_name = _("Payment Term")
+        verbose_name_plural = _("Payment Terms")
+        ordering = ['days', 'name']
+    
+    def __str__(self):
+        if self.days == 0:
+            return f"{self.code} - {self.name} (Immediate)"
+        return f"{self.code} - {self.name} ({self.days} days)"
+    
+    def save(self, *args, **kwargs):
+        if self.is_default:
+            PaymentTerm.objects.filter(is_default=True).exclude(pk=self.pk).update(is_default=False)
+        super().save(*args, **kwargs)
+
+
+# ==================== UNIT OF MEASURE (UOM) ====================
+
+class UnitOfMeasure(TimeStampedModel):
+    """Unit of Measure Master"""
+    UOM_TYPE_CHOICES = [
+        ('unit', _('Unit')),
+        ('weight', _('Weight')),
+        ('volume', _('Volume')),
+        ('length', _('Length')),
+        ('area', _('Area')),
+        ('time', _('Time')),
+    ]
+    
+    name = models.CharField(_("Unit Name"), max_length=50, unique=True)
+    code = models.CharField(_("Unit Code"), max_length=10, unique=True)
+    uom_type = models.CharField(_("Type"), max_length=20, choices=UOM_TYPE_CHOICES, default='unit')
+    is_base_unit = models.BooleanField(_("Base Unit"), default=False, help_text=_("Base unit for this type"))
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Unit of Measure")
+        verbose_name_plural = _("Units of Measure")
+        ordering = ['uom_type', 'name']
+    
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
+class UOMConversion(TimeStampedModel):
+    """UOM Conversion Rules"""
+    from_uom = models.ForeignKey(UnitOfMeasure, on_delete=models.PROTECT, related_name='conversions_from', verbose_name=_("From UOM"))
+    to_uom = models.ForeignKey(UnitOfMeasure, on_delete=models.PROTECT, related_name='conversions_to', verbose_name=_("To UOM"))
+    conversion_factor = models.DecimalField(_("Conversion Factor"), max_digits=18, decimal_places=6, validators=[MinValueValidator(Decimal('0.000001'))], help_text=_("1 From UOM = X To UOM"))
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("UOM Conversion")
+        verbose_name_plural = _("UOM Conversions")
+        unique_together = ['from_uom', 'to_uom']
+        ordering = ['from_uom', 'to_uom']
+    
+    def __str__(self):
+        return f"1 {self.from_uom.code} = {self.conversion_factor} {self.to_uom.code}"
+    
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.from_uom == self.to_uom:
+            raise ValidationError(_("From and To UOM cannot be the same."))
+
+
+# ==================== PRICE LIST ====================
+
+class PriceList(TimeStampedModel):
+    """Price List Master"""
+    PRICE_TYPE_CHOICES = [
+        ('sales', _('Sales Price')),
+        ('purchase', _('Purchase Price')),
+    ]
+    
+    name = models.CharField(_("Price List Name"), max_length=100, unique=True)
+    code = models.CharField(_("Price List Code"), max_length=20, unique=True)
+    price_type = models.CharField(_("Price Type"), max_length=20, choices=PRICE_TYPE_CHOICES, default='sales')
+    currency = models.ForeignKey(Currency, on_delete=models.PROTECT, related_name='price_lists', verbose_name=_("Currency"), null=True, blank=True)
+    
+    is_default = models.BooleanField(_("Default"), default=False)
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    # Validity
+    valid_from = models.DateField(_("Valid From"), default=timezone.now)
+    valid_to = models.DateField(_("Valid To"), null=True, blank=True)
+    
+    description = models.TextField(_("Description"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Price List")
+        verbose_name_plural = _("Price Lists")
+        ordering = ['price_type', '-is_default', 'name']
+    
+    def __str__(self):
+        return f"{self.code} - {self.name} ({self.get_price_type_display()})"
+    
+    def save(self, *args, **kwargs):
+        if self.is_default:
+            PriceList.objects.filter(price_type=self.price_type, is_default=True).exclude(pk=self.pk).update(is_default=False)
+        super().save(*args, **kwargs)
+
+
+class PriceListItem(TimeStampedModel):
+    """Price List Item - Product Prices"""
+    price_list = models.ForeignKey(PriceList, on_delete=models.CASCADE, related_name='items', verbose_name=_("Price List"))
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='price_list_items', verbose_name=_("Product"))
+    
+    unit_price = models.DecimalField(_("Unit Price"), max_digits=15, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
+    min_quantity = models.DecimalField(_("Minimum Quantity"), max_digits=10, decimal_places=2, default=Decimal('1.00'), help_text=_("Minimum quantity for this price"))
+    
+    # Optional discount
+    discount_percentage = models.DecimalField(_("Discount (%)"), max_digits=5, decimal_places=2, default=Decimal('0.00'))
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Price List Item")
+        verbose_name_plural = _("Price List Items")
+        unique_together = ['price_list', 'product', 'min_quantity']
+        ordering = ['price_list', 'product', 'min_quantity']
+    
+    def __str__(self):
+        return f"{self.price_list.code} - {self.product.name}: {self.unit_price}"
+    
+    @property
+    def net_price(self):
+        """Calculate net price after discount"""
+        if self.discount_percentage > 0:
+            discount = self.unit_price * (self.discount_percentage / Decimal('100'))
+            return self.unit_price - discount
+        return self.unit_price
+
+
+# ==================== DISCOUNT MANAGEMENT ====================
+
+class DiscountType(TimeStampedModel):
+    """Discount Type Master"""
+    DISCOUNT_METHOD_CHOICES = [
+        ('percentage', _('Percentage')),
+        ('fixed', _('Fixed Amount')),
+    ]
+    
+    APPLY_ON_CHOICES = [
+        ('order', _('Whole Order')),
+        ('product', _('Specific Product')),
+        ('category', _('Product Category')),
+        ('customer', _('Specific Customer')),
+        ('customer_group', _('Customer Group')),
+    ]
+    
+    name = models.CharField(_("Discount Name"), max_length=100, unique=True)
+    code = models.CharField(_("Discount Code"), max_length=20, unique=True)
+    discount_method = models.CharField(_("Method"), max_length=20, choices=DISCOUNT_METHOD_CHOICES, default='percentage')
+    apply_on = models.CharField(_("Apply On"), max_length=20, choices=APPLY_ON_CHOICES, default='order')
+    
+    value = models.DecimalField(_("Value"), max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], help_text=_("Percentage or Fixed Amount"))
+    max_discount_amount = models.DecimalField(_("Max Discount Amount"), max_digits=10, decimal_places=2, null=True, blank=True, help_text=_("Maximum discount cap for percentage"))
+    min_order_amount = models.DecimalField(_("Min Order Amount"), max_digits=10, decimal_places=2, default=Decimal('0.00'), help_text=_("Minimum order value to apply discount"))
+    
+    # Validity
+    valid_from = models.DateField(_("Valid From"), default=timezone.now)
+    valid_to = models.DateField(_("Valid To"), null=True, blank=True)
+    
+    # Usage limits
+    usage_limit = models.PositiveIntegerField(_("Usage Limit"), null=True, blank=True, help_text=_("Total times this discount can be used"))
+    usage_count = models.PositiveIntegerField(_("Usage Count"), default=0, editable=False)
+    per_customer_limit = models.PositiveIntegerField(_("Per Customer Limit"), null=True, blank=True)
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    description = models.TextField(_("Description"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Discount Type")
+        verbose_name_plural = _("Discount Types")
+        ordering = ['name']
+    
+    def __str__(self):
+        if self.discount_method == 'percentage':
+            return f"{self.code} - {self.name} ({self.value}%)"
+        return f"{self.code} - {self.name} ({self.value} fixed)"
+    
+    def is_valid(self):
+        """Check if discount is currently valid"""
+        from django.utils import timezone
+        today = timezone.now().date()
+        if not self.is_active:
+            return False
+        if self.valid_from and today < self.valid_from:
+            return False
+        if self.valid_to and today > self.valid_to:
+            return False
+        if self.usage_limit and self.usage_count >= self.usage_limit:
+            return False
+        return True
+    
+    def calculate_discount(self, amount):
+        """Calculate discount amount"""
+        if self.discount_method == 'percentage':
+            discount = amount * (self.value / Decimal('100'))
+            if self.max_discount_amount:
+                discount = min(discount, self.max_discount_amount)
+            return discount
+        return min(self.value, amount)
+
+
+class DiscountRule(TimeStampedModel):
+    """Discount Rules - Conditions for applying discounts"""
+    discount_type = models.ForeignKey(DiscountType, on_delete=models.CASCADE, related_name='rules', verbose_name=_("Discount Type"))
+    
+    # Conditions
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, null=True, blank=True, related_name='discount_rules', verbose_name=_("Product"))
+    category = models.ForeignKey(Category, on_delete=models.CASCADE, null=True, blank=True, related_name='discount_rules', verbose_name=_("Category"))
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, null=True, blank=True, related_name='discount_rules', verbose_name=_("Customer"))
+    
+    min_quantity = models.DecimalField(_("Min Quantity"), max_digits=10, decimal_places=2, default=Decimal('1.00'))
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Discount Rule")
+        verbose_name_plural = _("Discount Rules")
+        ordering = ['discount_type', 'id']
+    
+    def __str__(self):
+        return f"{self.discount_type.code} - Rule #{self.id}"
+
+
+# ==================== STOCK ADJUSTMENT ====================
+
+class StockAdjustment(TimeStampedModel):
+    """Stock Adjustment - Header/Info"""
+    ADJUSTMENT_TYPE_CHOICES = [
+        ('opening', _('Opening Stock')),
+        ('physical_count', _('Physical Count')),
+        ('damage', _('Damage/Loss')),
+        ('correction', _('Correction')),
+        ('write_off', _('Write Off')),
+        ('found', _('Found/Recovered')),
+    ]
+    
+    STATUS_CHOICES = [
+        ('draft', _('Draft')),
+        ('pending', _('Pending Approval')),
+        ('approved', _('Approved')),
+        ('posted', _('Posted')),
+        ('rejected', _('Rejected')),
+        ('cancelled', _('Cancelled')),
+    ]
+    
+    adjustment_number = models.CharField(_("Adjustment Number"), max_length=50, unique=True, editable=False)
+    adjustment_date = models.DateField(_("Adjustment Date"), default=timezone.now)
+    adjustment_type = models.CharField(_("Adjustment Type"), max_length=20, choices=ADJUSTMENT_TYPE_CHOICES, default='physical_count')
+    
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name='stock_adjustments', verbose_name=_("Warehouse"))
+    
+    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='draft')
+    reason = models.TextField(_("Reason"), blank=True)
+    
+    # Approval
+    requested_by = models.CharField(_("Requested By"), max_length=100, blank=True)
+    approved_by = models.CharField(_("Approved By"), max_length=100, blank=True)
+    approved_date = models.DateTimeField(_("Approved Date"), null=True, blank=True)
+    
+    # Totals
+    total_increase = models.DecimalField(_("Total Increase"), max_digits=12, decimal_places=2, default=Decimal('0.00'), editable=False)
+    total_decrease = models.DecimalField(_("Total Decrease"), max_digits=12, decimal_places=2, default=Decimal('0.00'), editable=False)
+    total_value = models.DecimalField(_("Total Value"), max_digits=15, decimal_places=2, default=Decimal('0.00'), editable=False)
+    
+    notes = models.TextField(_("Notes"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Stock Adjustment")
+        verbose_name_plural = _("Stock Adjustments")
+        ordering = ['-adjustment_date', '-created_at']
+    
+    def __str__(self):
+        return f"{self.adjustment_number} - {self.get_adjustment_type_display()}"
+    
+    def save(self, *args, **kwargs):
+        if not self.adjustment_number:
+            last = StockAdjustment.objects.order_by('-id').first()
+            if last:
+                last_num = int(last.adjustment_number.split('-')[-1])
+                self.adjustment_number = f"ADJ-{last_num + 1:06d}"
+            else:
+                self.adjustment_number = "ADJ-000001"
+        super().save(*args, **kwargs)
+    
+    def calculate_totals(self):
+        """Calculate totals from items"""
+        items = self.items.all()
+        self.total_increase = sum(item.quantity_difference for item in items if item.quantity_difference > 0)
+        self.total_decrease = abs(sum(item.quantity_difference for item in items if item.quantity_difference < 0))
+        self.total_value = sum(item.value_difference for item in items)
+        self.save(update_fields=['total_increase', 'total_decrease', 'total_value'])
+
+
+class StockAdjustmentItem(TimeStampedModel):
+    """Stock Adjustment Item - Line Item"""
+    stock_adjustment = models.ForeignKey(StockAdjustment, on_delete=models.CASCADE, related_name='items', verbose_name=_("Stock Adjustment"))
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, verbose_name=_("Product"))
+    
+    system_quantity = models.DecimalField(_("System Quantity"), max_digits=10, decimal_places=2, default=Decimal('0.00'), help_text=_("Current stock in system"))
+    actual_quantity = models.DecimalField(_("Actual Quantity"), max_digits=10, decimal_places=2, default=Decimal('0.00'), help_text=_("Physical count quantity"))
+    quantity_difference = models.DecimalField(_("Difference"), max_digits=10, decimal_places=2, default=Decimal('0.00'), editable=False)
+    
+    unit_cost = models.DecimalField(_("Unit Cost"), max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    value_difference = models.DecimalField(_("Value Difference"), max_digits=12, decimal_places=2, default=Decimal('0.00'), editable=False)
+    
+    reason = models.CharField(_("Item Reason"), max_length=200, blank=True)
+    
+    class Meta:
+        verbose_name = _("Stock Adjustment Item")
+        verbose_name_plural = _("Stock Adjustment Items")
+        ordering = ['id']
+    
+    def __str__(self):
+        return f"{self.stock_adjustment.adjustment_number} - {self.product.name}"
+    
+    def save(self, *args, **kwargs):
+        # Auto-set system quantity from product stock
+        if self.system_quantity == Decimal('0.00') and self.product:
+            warehouse_stock = ProductWarehouseStock.objects.filter(
+                product=self.product, 
+                warehouse=self.stock_adjustment.warehouse
+            ).first()
+            self.system_quantity = warehouse_stock.quantity if warehouse_stock else Decimal('0.00')
+        
+        # Auto-set unit cost from product
+        if self.unit_cost == Decimal('0.00') and self.product:
+            self.unit_cost = self.product.purchase_price
+        
+        # Calculate difference
+        self.quantity_difference = self.actual_quantity - self.system_quantity
+        self.value_difference = self.quantity_difference * self.unit_cost
+        
+        super().save(*args, **kwargs)
+        self.stock_adjustment.calculate_totals()
+
+
+# ==================== APPROVAL WORKFLOW ====================
+
+class ApprovalWorkflow(TimeStampedModel):
+    """Approval Workflow Configuration"""
+    DOCUMENT_TYPE_CHOICES = [
+        ('sales_quotation', _('Sales Quotation')),
+        ('sales_order', _('Sales Order')),
+        ('purchase_quotation', _('Purchase Quotation')),
+        ('purchase_order', _('Purchase Order')),
+        ('invoice', _('Invoice')),
+        ('purchase_invoice', _('Purchase Invoice')),
+        ('stock_adjustment', _('Stock Adjustment')),
+        ('journal_entry', _('Journal Entry')),
+        ('payment', _('Payment')),
+    ]
+    
+    name = models.CharField(_("Workflow Name"), max_length=100)
+    document_type = models.CharField(_("Document Type"), max_length=30, choices=DOCUMENT_TYPE_CHOICES, unique=True)
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    description = models.TextField(_("Description"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Approval Workflow")
+        verbose_name_plural = _("Approval Workflows")
+        ordering = ['document_type']
+    
+    def __str__(self):
+        return f"{self.name} ({self.get_document_type_display()})"
+
+
+class ApprovalLevel(TimeStampedModel):
+    """Approval Levels within a Workflow"""
+    workflow = models.ForeignKey(ApprovalWorkflow, on_delete=models.CASCADE, related_name='levels', verbose_name=_("Workflow"))
+    
+    level = models.PositiveSmallIntegerField(_("Level"), default=1)
+    name = models.CharField(_("Level Name"), max_length=100)
+    
+    # Conditions
+    min_amount = models.DecimalField(_("Min Amount"), max_digits=15, decimal_places=2, default=Decimal('0.00'))
+    max_amount = models.DecimalField(_("Max Amount"), max_digits=15, decimal_places=2, null=True, blank=True)
+    
+    # Approvers (can be user or role based)
+    approver_user = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='approval_levels', verbose_name=_("Approver User"))
+    approver_role = models.CharField(_("Approver Role"), max_length=100, blank=True, help_text=_("Role/Group name for approval"))
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Approval Level")
+        verbose_name_plural = _("Approval Levels")
+        ordering = ['workflow', 'level']
+        unique_together = ['workflow', 'level']
+    
+    def __str__(self):
+        return f"{self.workflow.name} - Level {self.level}: {self.name}"
+
+
+class ApprovalRequest(TimeStampedModel):
+    """Approval Request - Tracks approval status for documents"""
+    STATUS_CHOICES = [
+        ('pending', _('Pending')),
+        ('approved', _('Approved')),
+        ('rejected', _('Rejected')),
+        ('cancelled', _('Cancelled')),
+    ]
+    
+    workflow = models.ForeignKey(ApprovalWorkflow, on_delete=models.PROTECT, related_name='requests', verbose_name=_("Workflow"))
+    
+    # Generic relation to any document
+    document_type = models.CharField(_("Document Type"), max_length=30)
+    document_id = models.PositiveIntegerField(_("Document ID"))
+    document_number = models.CharField(_("Document Number"), max_length=50)
+    document_amount = models.DecimalField(_("Document Amount"), max_digits=15, decimal_places=2, default=Decimal('0.00'))
+    
+    current_level = models.PositiveSmallIntegerField(_("Current Level"), default=1)
+    status = models.CharField(_("Status"), max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    requested_by = models.ForeignKey('auth.User', on_delete=models.PROTECT, related_name='approval_requests', verbose_name=_("Requested By"))
+    requested_date = models.DateTimeField(_("Requested Date"), auto_now_add=True)
+    
+    notes = models.TextField(_("Notes"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Approval Request")
+        verbose_name_plural = _("Approval Requests")
+        ordering = ['-requested_date']
+    
+    def __str__(self):
+        return f"{self.document_number} - {self.get_status_display()}"
+
+
+class ApprovalHistory(TimeStampedModel):
+    """Approval History - Audit trail for approvals"""
+    ACTION_CHOICES = [
+        ('submitted', _('Submitted')),
+        ('approved', _('Approved')),
+        ('rejected', _('Rejected')),
+        ('returned', _('Returned for Revision')),
+        ('cancelled', _('Cancelled')),
+    ]
+    
+    approval_request = models.ForeignKey(ApprovalRequest, on_delete=models.CASCADE, related_name='history', verbose_name=_("Approval Request"))
+    
+    level = models.PositiveSmallIntegerField(_("Level"))
+    action = models.CharField(_("Action"), max_length=20, choices=ACTION_CHOICES)
+    action_by = models.ForeignKey('auth.User', on_delete=models.PROTECT, related_name='approval_actions', verbose_name=_("Action By"))
+    action_date = models.DateTimeField(_("Action Date"), auto_now_add=True)
+    
+    comments = models.TextField(_("Comments"), blank=True)
+    
+    class Meta:
+        verbose_name = _("Approval History")
+        verbose_name_plural = _("Approval Histories")
+        ordering = ['-action_date']
+    
+    def __str__(self):
+        return f"{self.approval_request.document_number} - Level {self.level} - {self.get_action_display()}"
+
+
+# ==================== NOTIFICATION / ALERT ====================
+
+class NotificationType(TimeStampedModel):
+    """Notification Type Configuration"""
+    TRIGGER_CHOICES = [
+        ('low_stock', _('Low Stock Alert')),
+        ('payment_due', _('Payment Due')),
+        ('payment_overdue', _('Payment Overdue')),
+        ('order_status', _('Order Status Change')),
+        ('approval_pending', _('Approval Pending')),
+        ('approval_completed', _('Approval Completed')),
+        ('document_created', _('Document Created')),
+        ('price_change', _('Price Change')),
+        ('expiry_alert', _('Expiry Alert')),
+        ('custom', _('Custom')),
+    ]
+    
+    CHANNEL_CHOICES = [
+        ('system', _('System Notification')),
+        ('email', _('Email')),
+        ('sms', _('SMS')),
+        ('both', _('Email & SMS')),
+    ]
+    
+    name = models.CharField(_("Notification Name"), max_length=100, unique=True)
+    code = models.CharField(_("Code"), max_length=30, unique=True)
+    trigger = models.CharField(_("Trigger"), max_length=30, choices=TRIGGER_CHOICES)
+    channel = models.CharField(_("Channel"), max_length=20, choices=CHANNEL_CHOICES, default='system')
+    
+    subject_template = models.CharField(_("Subject Template"), max_length=200, help_text=_("Use {variable} for dynamic content"))
+    message_template = models.TextField(_("Message Template"), help_text=_("Use {variable} for dynamic content"))
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    
+    class Meta:
+        verbose_name = _("Notification Type")
+        verbose_name_plural = _("Notification Types")
+        ordering = ['trigger', 'name']
+    
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
+class NotificationSetting(TimeStampedModel):
+    """User Notification Settings"""
+    user = models.ForeignKey('auth.User', on_delete=models.CASCADE, related_name='notification_settings', verbose_name=_("User"))
+    notification_type = models.ForeignKey(NotificationType, on_delete=models.CASCADE, related_name='user_settings', verbose_name=_("Notification Type"))
+    
+    is_enabled = models.BooleanField(_("Enabled"), default=True)
+    email_enabled = models.BooleanField(_("Email Enabled"), default=True)
+    sms_enabled = models.BooleanField(_("SMS Enabled"), default=False)
+    
+    class Meta:
+        verbose_name = _("Notification Setting")
+        verbose_name_plural = _("Notification Settings")
+        unique_together = ['user', 'notification_type']
+        ordering = ['user', 'notification_type']
+    
+    def __str__(self):
+        return f"{self.user.username} - {self.notification_type.name}"
+
+
+class Notification(TimeStampedModel):
+    """Notification - Individual notifications sent to users"""
+    PRIORITY_CHOICES = [
+        ('low', _('Low')),
+        ('normal', _('Normal')),
+        ('high', _('High')),
+        ('urgent', _('Urgent')),
+    ]
+    
+    STATUS_CHOICES = [
+        ('unread', _('Unread')),
+        ('read', _('Read')),
+        ('archived', _('Archived')),
+    ]
+    
+    user = models.ForeignKey('auth.User', on_delete=models.CASCADE, related_name='notifications', verbose_name=_("User"))
+    notification_type = models.ForeignKey(NotificationType, on_delete=models.SET_NULL, null=True, blank=True, related_name='notifications', verbose_name=_("Notification Type"))
+    
+    title = models.CharField(_("Title"), max_length=200)
+    message = models.TextField(_("Message"))
+    
+    priority = models.CharField(_("Priority"), max_length=10, choices=PRIORITY_CHOICES, default='normal')
+    status = models.CharField(_("Status"), max_length=10, choices=STATUS_CHOICES, default='unread')
+    
+    # Link to related document
+    link_url = models.CharField(_("Link URL"), max_length=500, blank=True)
+    document_type = models.CharField(_("Document Type"), max_length=50, blank=True)
+    document_id = models.PositiveIntegerField(_("Document ID"), null=True, blank=True)
+    
+    # Delivery status
+    email_sent = models.BooleanField(_("Email Sent"), default=False)
+    sms_sent = models.BooleanField(_("SMS Sent"), default=False)
+    
+    read_at = models.DateTimeField(_("Read At"), null=True, blank=True)
+    
+    class Meta:
+        verbose_name = _("Notification")
+        verbose_name_plural = _("Notifications")
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"{self.user.username} - {self.title}"
+    
+    def mark_as_read(self):
+        """Mark notification as read"""
+        if self.status == 'unread':
+            self.status = 'read'
+            self.read_at = timezone.now()
+            self.save(update_fields=['status', 'read_at'])
+
+
+class AlertRule(TimeStampedModel):
+    """Alert Rules - Automated alert triggers"""
+    CONDITION_TYPE_CHOICES = [
+        ('stock_below', _('Stock Below Threshold')),
+        ('days_before_due', _('Days Before Due Date')),
+        ('days_overdue', _('Days Overdue')),
+        ('amount_above', _('Amount Above Threshold')),
+        ('amount_below', _('Amount Below Threshold')),
+    ]
+    
+    name = models.CharField(_("Rule Name"), max_length=100)
+    notification_type = models.ForeignKey(NotificationType, on_delete=models.CASCADE, related_name='alert_rules', verbose_name=_("Notification Type"))
+    
+    condition_type = models.CharField(_("Condition Type"), max_length=30, choices=CONDITION_TYPE_CHOICES)
+    threshold_value = models.DecimalField(_("Threshold Value"), max_digits=15, decimal_places=2, default=Decimal('0.00'))
+    
+    # Optional filters
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, null=True, blank=True, related_name='alert_rules', verbose_name=_("Product"))
+    category = models.ForeignKey(Category, on_delete=models.CASCADE, null=True, blank=True, related_name='alert_rules', verbose_name=_("Category"))
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, null=True, blank=True, related_name='alert_rules', verbose_name=_("Customer"))
+    
+    # Recipients
+    notify_users = models.ManyToManyField('auth.User', blank=True, related_name='alert_rules', verbose_name=_("Notify Users"))
+    
+    is_active = models.BooleanField(_("Active"), default=True)
+    last_triggered = models.DateTimeField(_("Last Triggered"), null=True, blank=True)
+    
+    class Meta:
+        verbose_name = _("Alert Rule")
+        verbose_name_plural = _("Alert Rules")
+        ordering = ['name']
+    
+    def __str__(self):
+        return f"{self.name} ({self.get_condition_type_display()})"

@@ -6,12 +6,14 @@ from django.shortcuts import render
 from django.views import View
 from django.utils.decorators import method_decorator
 from django.contrib.admin.views.decorators import staff_member_required
-from django.db.models import Sum, F
+from django.db.models import Sum, F, Count, Q
+from django.http import HttpResponse
 from decimal import Decimal
+from datetime import datetime
 
 from ..models import (
-    SalesOrder, SalesOrderItem, Invoice, PurchaseOrder, Product, 
-    Customer, Supplier, Category, SalesPerson
+    SalesOrder, SalesOrderItem, PurchaseOrder, PurchaseOrderItem,
+    Product, Customer, Supplier, Category, SalesPerson
 )
 
 
@@ -116,7 +118,7 @@ class SalesReportView(View):
         # Headers
         headers = [
             'Order #', 'Order Date', 'Customer', 'Salesperson',
-            'Product', 'Quantity', 'Unit Price', 'Discount', 'Tax', 'Line Total', 'Status'
+            'Product', 'Quantity', 'Unit Price', 'Line Total', 'Status'
         ]
         
         for col, header in enumerate(headers, 1):
@@ -135,10 +137,8 @@ class SalesReportView(View):
             ws.cell(row=row, column=5, value=item.product.name).border = border
             ws.cell(row=row, column=6, value=float(item.quantity)).border = border
             ws.cell(row=row, column=7, value=float(item.unit_price)).border = border
-            ws.cell(row=row, column=8, value=float(item.discount_amount)).border = border
-            ws.cell(row=row, column=9, value=float(item.tax_amount)).border = border
-            ws.cell(row=row, column=10, value=float(item.line_total)).border = border
-            ws.cell(row=row, column=11, value=item.sales_order.get_status_display()).border = border
+            ws.cell(row=row, column=8, value=float(item.line_total)).border = border
+            ws.cell(row=row, column=9, value=item.sales_order.get_status_display()).border = border
         
         # Adjust column widths
         ws.column_dimensions['A'].width = 15
@@ -148,10 +148,8 @@ class SalesReportView(View):
         ws.column_dimensions['E'].width = 30
         ws.column_dimensions['F'].width = 10
         ws.column_dimensions['G'].width = 12
-        ws.column_dimensions['H'].width = 10
-        ws.column_dimensions['I'].width = 10
-        ws.column_dimensions['J'].width = 12
-        ws.column_dimensions['K'].width = 15
+        ws.column_dimensions['H'].width = 12
+        ws.column_dimensions['I'].width = 15
         
         # Create response
         response = HttpResponse(
@@ -164,7 +162,7 @@ class SalesReportView(View):
 
 
 class PurchaseReportView(View):
-    """Purchase Report View - Shows Purchase Orders"""
+    """Enhanced Purchase Report View with Excel Export"""
     
     @method_decorator(staff_member_required)
     def dispatch(self, *args, **kwargs):
@@ -175,78 +173,128 @@ class PurchaseReportView(View):
         from_date = request.GET.get('from_date')
         to_date = request.GET.get('to_date')
         supplier_id = request.GET.get('supplier')
+        product_id = request.GET.get('product')
         status = request.GET.get('status')
+        export_excel = request.GET.get('export') == 'excel'
         
-        # Default queryset
-        purchases = PurchaseOrder.objects.select_related('supplier').prefetch_related('items').order_by('-order_date')
+        # Base queryset - get purchase order items for detailed reporting
+        order_items = PurchaseOrderItem.objects.select_related(
+            'purchase_order', 'purchase_order__supplier', 'product'
+        ).order_by('-purchase_order__order_date', '-purchase_order__order_number')
         
         # Apply filters
         if from_date:
-            purchases = purchases.filter(order_date__gte=from_date)
+            order_items = order_items.filter(purchase_order__order_date__gte=from_date)
         if to_date:
-            purchases = purchases.filter(order_date__lte=to_date)
+            order_items = order_items.filter(purchase_order__order_date__lte=to_date)
         if supplier_id:
-            purchases = purchases.filter(supplier_id=supplier_id)
+            order_items = order_items.filter(purchase_order__supplier_id=supplier_id)
+        if product_id:
+            order_items = order_items.filter(product_id=product_id)
         if status:
-            purchases = purchases.filter(status=status)
+            order_items = order_items.filter(purchase_order__status=status)
+        
+        # Excel export
+        if export_excel:
+            return self.export_to_excel(order_items, request)
         
         # Calculate statistics
-        total_purchases = purchases.count()
-        total_amount = purchases.aggregate(total=Sum('total_amount'))['total'] or Decimal('0.00')
-        total_paid = purchases.aggregate(total=Sum('paid_amount'))['total'] or Decimal('0.00')
-        total_due = purchases.aggregate(total=Sum('due_amount'))['total'] or Decimal('0.00')
+        total_items = order_items.count()
+        total_amount = order_items.aggregate(total=Sum('line_total'))['total'] or Decimal('0.00')
+        total_quantity = order_items.aggregate(total=Sum('quantity'))['total'] or Decimal('0.00')
         
-        # Status breakdown
-        draft_count = purchases.filter(status='draft').count()
-        sent_count = purchases.filter(status='sent').count()
-        confirmed_count = purchases.filter(status='confirmed').count()
-        received_count = purchases.filter(status='received').count()
-        completed_count = purchases.filter(status='completed').count()
+        # Get unique orders count
+        unique_orders = order_items.values('purchase_order').distinct().count()
         
-        # Get limit from request
-        limit = request.GET.get('limit', '100')
-        if limit == 'all':
-            limited_purchases = purchases
-            showing_limited = False
-        else:
-            try:
-                limit_int = int(limit)
-                limited_purchases = purchases[:limit_int]
-                showing_limited = total_purchases > limit_int
-            except ValueError:
-                limited_purchases = purchases[:100]
-                showing_limited = total_purchases > 100
-                limit = '100'
-        
-        # Get all suppliers for filter
+        # Get filter options
         suppliers = Supplier.objects.filter(is_active=True).order_by('name')
+        products = Product.objects.filter(is_active=True).order_by('name')
         
         context = {
             **admin.site.each_context(request),
             'title': 'Purchase Report',
-            'subtitle': 'View and filter purchase order records',
-            'purchases': limited_purchases,
-            'suppliers': suppliers,
-            'total_purchases': total_purchases,
+            'subtitle': 'Detailed purchase analysis with filters',
+            'order_items': order_items[:500],  # Limit for performance
+            'total_items': total_items,
             'total_amount': total_amount,
-            'total_paid': total_paid,
-            'total_due': total_due,
-            'draft_count': draft_count,
-            'sent_count': sent_count,
-            'confirmed_count': confirmed_count,
-            'received_count': received_count,
-            'completed_count': completed_count,
-            'showing_limited': showing_limited,
-            'current_limit': limit,
+            'total_quantity': total_quantity,
+            'unique_orders': unique_orders,
+            'suppliers': suppliers,
+            'products': products,
             'filters': {
                 'from_date': from_date or '',
                 'to_date': to_date or '',
                 'supplier': supplier_id or '',
+                'product': product_id or '',
                 'status': status or '',
             }
         }
         
         return render(request, 'admin/erp/purchase_report.html', context)
+    
+    def export_to_excel(self, order_items, request):
+        """Export purchase report to Excel"""
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+        
+        # Create workbook
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Purchase Report"
+        
+        # Header style
+        header_fill = PatternFill(start_color="C4D82E", end_color="C4D82E", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        
+        # Headers
+        headers = [
+            'Order #', 'Order Date', 'Supplier',
+            'Product', 'Quantity', 'Unit Price', 'Line Total', 'Status'
+        ]
+        
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+            cell.border = border
+        
+        # Data rows
+        for row, item in enumerate(order_items, 2):
+            ws.cell(row=row, column=1, value=item.purchase_order.order_number).border = border
+            ws.cell(row=row, column=2, value=item.purchase_order.order_date.strftime('%Y-%m-%d')).border = border
+            ws.cell(row=row, column=3, value=item.purchase_order.supplier.name).border = border
+            ws.cell(row=row, column=4, value=item.product.name).border = border
+            ws.cell(row=row, column=5, value=float(item.quantity)).border = border
+            ws.cell(row=row, column=6, value=float(item.unit_price)).border = border
+            ws.cell(row=row, column=7, value=float(item.line_total)).border = border
+            ws.cell(row=row, column=8, value=item.purchase_order.get_status_display()).border = border
+        
+        # Adjust column widths
+        ws.column_dimensions['A'].width = 15
+        ws.column_dimensions['B'].width = 12
+        ws.column_dimensions['C'].width = 25
+        ws.column_dimensions['D'].width = 30
+        ws.column_dimensions['E'].width = 10
+        ws.column_dimensions['F'].width = 12
+        ws.column_dimensions['G'].width = 12
+        ws.column_dimensions['H'].width = 15
+        
+        # Create response
+        response = HttpResponse(
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = f'attachment; filename=purchase_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+        
+        wb.save(response)
+        return response
 
 
 class StockReportView(View):
